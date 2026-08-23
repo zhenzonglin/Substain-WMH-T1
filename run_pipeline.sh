@@ -14,9 +14,9 @@ case "${mode}" in
     "${root}/scripts/steps/00_prepare.sh"
     "${root}/scripts/steps/01_audit.sh" "${participant}"
     "${root}/scripts/steps/02_features.sh" "${participant}" "${profile}" "${cores}"
-    "${root}/scripts/steps/03_qc.sh" "${participant}"
-    "${root}/scripts/steps/04_export.sh" "${participant}"
-    "${root}/scripts/steps/05_verify.sh"
+    echo "批量特征提取及四张QC图已完成；人工QC不会阻断计算。"
+    echo "需要审核时运行: ./run_pipeline.sh qc ${participant}"
+    echo "全部审核后运行: ./run_pipeline.sh export ${participant} && ./run_pipeline.sh verify"
     ;;
   prepare) "${root}/scripts/steps/00_prepare.sh" ;;
   audit) "${root}/scripts/steps/01_audit.sh" "${participant}" ;;

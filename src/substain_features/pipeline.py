@@ -289,6 +289,7 @@ def stage_wmh_segmentation(config: Mapping[str, object], participant: Participan
         "runtime_sha256": sha256(runtime),
         "device": device,
         "crop_enabled": device == "cuda",
+        "inference_precision": "fp16" if device == "cuda" else "fp32",
     }
     existing_provenance = _read_json(provenance_path) if provenance_path.is_file() else {}
     reusable = (
@@ -472,7 +473,7 @@ def stage_t1(config: Mapping[str, object], participant: Participant, profile: st
 
 
 def stage_qc(config: Mapping[str, object], participant: Participant) -> Dict[str, object]:
-    """从已通过节点重建固定四张中央QC图；清理本例旧图以免版本混杂。"""
+    """生成供后续人工判读的四张图；本节点不作人工结论，也不门控特征提取。"""
 
     states = {stage: _read_json(status_path(config, participant, stage)) for stage in ("lesion", "registration", "wmh", "t1")}
     failed = [stage for stage, state in states.items() if state.get("status") != "pass"]
@@ -499,10 +500,16 @@ def stage_qc(config: Mapping[str, object], participant: Participant) -> Dict[str
         "qc_dir": str(qc_dir(config)),
         "figures": [str(path) for path in figures],
         "figure_count": len(figures),
-        "display_convention": "radiological_RAS_canonical_rotated_ccw_90",
+        "display_convention": "radiological_RAS_canonical_standard_axes",
         "panel_order": ["Coronal", "Sagittal", "Axial"],
         "physical_aspect_from_voxel_spacing": True,
-        "subpanel_rotation_degrees": 90,
+        "subpanel_rotation_degrees": 0,
+        "slice_selection": {
+            "lesion_on_T1": "max_lesion_voxel_count_per_plane",
+            "lesion_on_FLAIR": "max_lesion_voxel_count_per_plane",
+            "WMH_lesion_overlap": "max_overlap_voxel_count_per_plane_else_union",
+            "T1_macro20": "max_macro20_voxel_count_per_plane",
+        },
     }
 
 
@@ -680,6 +687,9 @@ def stage_cleanup(config: Mapping[str, object], participant: Participant) -> Dic
     wmh = states["wmh"]["details"]
     t1 = states["t1"]["details"]
     retained = {
+        # 四图人工QC可能在代码升级或显示规则变化后重建；保留两个体积很小的病灶叠加掩膜。
+        Path(str(lesion["lesion_t1"])).resolve(),
+        Path(str(lesion["lesion_flair"])).resolve(),
         Path(str(wmh_seg["segmentation"])).resolve(),
         Path(str(wmh["original_wmh"])).resolve(),
         Path(str(wmh["corrected_wmh"])).resolve(),
@@ -709,7 +719,7 @@ def stage_cleanup(config: Mapping[str, object], participant: Participant) -> Dic
             subject_root / "registration" / "t1_to_ch2better_1InverseWarp.nii.gz",
         ]
     )
-    for key in ("lesion_ch2better", "lesion_t1", "lesion_flair"):
+    for key in ("lesion_ch2better",):
         if lesion.get(key):
             candidates.append(Path(str(lesion[key])))
     for key in (

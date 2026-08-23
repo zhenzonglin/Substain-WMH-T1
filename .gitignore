@@ -7,6 +7,7 @@ transfer/
 inputs/bids_links/
 config/participants.tsv
 config/metadata.tsv
+inputs/
 
 # 本机已安装环境、wheel与离线运行产物
 envs/core-venv/

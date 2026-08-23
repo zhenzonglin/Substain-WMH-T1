@@ -14,10 +14,22 @@ input:
   lesion_root: Lesion
   t1_suffix: _T1w.nii.gz
   flair_suffix: _FLAIR.nii.gz
-  # V1.0只接受FSL MNI152 1/2 mm二值病灶；旧T1空间示例会被拒绝。
+  # V1.0只接受FSL MNI152 1/2 mm二值病灶。
   lesion_suffix: _space-MNI152_desc-acute_mask.nii.gz
   metadata_tsv: config/metadata.tsv
   bids_links: inputs/bids_links
+
+#input:
+#  mode: folders
+#  t1_root: /data/T1
+#  flair_root: /data/FLAIR
+#  lesion_root: /data/Lesion
+#  t1_suffix: _T1w.nii.gz
+#  flair_suffix: _FLAIR.nii.gz
+#  lesion_suffix: _space-MNI152_desc-acute_mask.nii.gz
+#  metadata_tsv: config/metadata.tsv
+#  bids_links: inputs/bids_links
+
 wmh:
   model: resources/models/WMH-SynthSeg_v10_231110.pth
   lesion_label: 77

@@ -55,3 +55,28 @@ def test_wmh_subprocess_inherits_current_interpreter(tmp_path: Path, monkeypatch
     monkeypatch.setattr("substain_features.wmh.subprocess.run", fake_run)
     run_wmh_synthseg(flair, output, tmp_path / "vol.csv", model, source_root, "cpu", tmp_path / "run.log")
     assert captured["command"][0] == sys.executable
+
+
+def test_wmh_cuda_uses_crop_and_fp16(tmp_path: Path, monkeypatch) -> None:
+    """16 GB GPU 路径必须显式启用裁剪与半精度，避免回退到超显存 FP32。"""
+
+    source_root = tmp_path / "third_party" / "repo"
+    runtime = tmp_path / "runtime" / "wmh_synthseg_inference.py"
+    model = tmp_path / "model.pth"
+    flair = tmp_path / "flair.nii.gz"
+    output = tmp_path / "seg.nii.gz"
+    for path in (source_root, runtime.parent):
+        path.mkdir(parents=True, exist_ok=True)
+    for path in (runtime, model, flair):
+        path.write_bytes(b"test")
+    captured = {}
+
+    def fake_run(command, **kwargs):
+        captured["command"] = command
+        output.write_bytes(b"seg")
+        return SimpleNamespace(returncode=0)
+
+    monkeypatch.setattr("substain_features.wmh.subprocess.run", fake_run)
+    run_wmh_synthseg(flair, output, tmp_path / "vol.csv", model, source_root, "cuda", tmp_path / "run.log")
+    assert "--crop" in captured["command"]
+    assert "--gpu_fp16" in captured["command"]

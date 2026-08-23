@@ -6,7 +6,8 @@ from pathlib import Path
 configfile: "config/config.yaml"
 
 ROOT = Path(workflow.basedir).resolve().parent
-CONFIG_FILE = ROOT / "config" / "config.yaml"
+CONFIG_FILE = Path(config.get("active_config_file", ROOT / "config" / "config.yaml"))
+CONFIG_FILE = CONFIG_FILE if CONFIG_FILE.is_absolute() else (ROOT / CONFIG_FILE).resolve()
 DERIVATIVES = ROOT / config["derivatives"]
 PROFILE = config.get("profile", config.get("default_profile", "gpu"))
 if PROFILE == "auto":
@@ -89,10 +90,10 @@ rule audit:
         "PYTHONPATH={ROOT}/src {CORE} -m substain_features.cli audit --config-file {CONFIG_FILE} --participant-id {SELECTED}"
 
 
-# 04 WMH-SynthSeg（在病灶空间链确认后运行）
+# 04 WMH-SynthSeg（等待病灶空间链确认，但不消费病灶数值）
 rule wmh_segmentation:
     input:
-        stage_pattern("lesion")
+        ancient(stage_pattern("lesion"))
     output:
         stage_pattern("wmh_seg")
     wildcard_constraints:
@@ -146,7 +147,8 @@ rule wmh:
 # 06 T1 145/119/20维与技术常模
 rule t1:
     input:
-        lesion=stage_pattern("lesion")
+        # 病灶仅用于保证流程排序和后续QC，不进入DLMUSE体积计算；更新时间不能触发T1重算。
+        lesion=ancient(stage_pattern("lesion"))
     output:
         stage_pattern("t1")
     wildcard_constraints:
@@ -157,7 +159,7 @@ rule t1:
         recorded_subject_failure_allowed(execution_command(T1_PYTHON, "-m substain_features.cli stage t1 --config-file {} --participant-id {{wildcards.participant}} --profile {}".format(CONFIG_FILE, PROFILE), needs_gpu=True))
 
 
-# 07 集中QC
+# 07 自动生成集中QC材料；不包含人工判读，也不门控特征聚合
 rule qc:
     input:
         lesion=stage_pattern("lesion"),

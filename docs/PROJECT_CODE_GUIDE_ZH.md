@@ -32,7 +32,9 @@ Substain/
 | 04 | `export` | `04_export.sh` | 仅导出人工QC通过病例 |
 | 05 | `verify` | `05_verify.sh` | 验收表格、QC和并行契约 |
 
-`all`按00–05执行。GUI中断时不会运行`export`；再次执行`qc`继续审核，完成后再执行`export`和`verify`。
+`all`只按00–02执行，完成全部病例的特征、四张QC图和`features_computed40.tsv`后退出，不启动GUI，
+也不执行正式导出。`qc`、`export`和`verify`是后续独立命令；GUI中断不影响已完成指标，重新执行
+`qc`会从上次审核进度继续。
 
 ## 3. 各步骤输入、函数与输出
 
@@ -150,9 +152,11 @@ pipeline.stage_t1()
 
 DLICV/DLMUSE产生最终分割。145个原生ROI中保留119个灰质ROI，再按`muse_macro20_v1_provisional`求和到20个互斥宏区。聚合先求原始体积总和，不平均ROI z分数。技术常模计算`log(宏区体积/非脑室MUSE组织总体积)`并输出体积越小越高的萎缩z分数。
 
-### 02.6 四图与清理
+### 02.6 自动生成四图与清理
 
-`pipeline.stage_qc()`只调用`save_overlay()`和`save_dual_overlay()`生成四张中央图。`images._orthogonal_qc_views()`保持物理比例，并将每个冠状、矢状和轴位子图逆时针旋转90度。
+`pipeline.stage_qc()`只调用`save_overlay()`和`save_dual_overlay()`生成四张中央图。这个自动节点只表示
+QC材料生成成功，不代表人工判读通过。`images._orthogonal_qc_views()`保持物理比例，并按标准临床
+放射学方向直接显示冠状、矢状和轴位，不对RAS标准化后的切片追加旋转。
 
 `pipeline.stage_cleanup()`只在四图成功且所有计算节点通过后执行。它逐个验证清理目标位于当前受试者衍生目录，保留最终分割/特征/日志，删除可重建影像和DLMUSE临时目录，并写`cleanup_manifest.json`。失败病例不清理。
 
@@ -161,6 +165,11 @@ DLICV/DLMUSE产生最终分割。145个原生ROI中保留119个灰质ROI，再�
 调用：`cli.qc_command()` → `qc_review.serve_qc()`。
 
 Python标准库`ThreadingHTTPServer`只绑定`127.0.0.1`。浏览器2×2显示四图。SQLite表是权威状态；TSV是同步副本。每次保存使用事务，支持上一例、下一例、跳转、修改和中断恢复。图像或处理状态哈希变化后，旧判定变为`stale`。
+
+该步骤不属于特征计算的依赖链。可以先完成全部病例的`features_computed40.tsv`，之后分批审核；人工
+判定只在04导出时决定哪些病例进入SuStaIn正式输入。
+
+四图统一使用RAS标准化后的临床放射学方向：冠状位和轴位图像左侧为患者右侧，矢状位图像左侧为前方，所有平面上方为解剖学上方/前方。三个正交面分别选择叠加掩膜体素最多的层面；WMH–病灶图优先按实际重叠选择，无重叠时使用联合掩膜。选择规则写入每例`status/qc.json`。
 
 ### 04 导出
 

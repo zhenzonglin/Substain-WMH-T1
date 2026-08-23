@@ -46,6 +46,13 @@ def _context(config_path: Path) -> tuple:
     return config, root, participants
 
 
+def _derivatives_root(config: Mapping[str, object], root: Path) -> Path:
+    """解析当前配置的衍生目录，禁止阶段命令回退到默认输出路径。"""
+
+    derivatives = Path(str(config["derivatives"]))
+    return derivatives if derivatives.is_absolute() else root / derivatives
+
+
 @click.group()
 @click.version_option(version=__version__, prog_name="substain-features")
 def main() -> None:
@@ -140,6 +147,7 @@ def run_command(
             "--resources",
             "gpu={}".format(len(gpu_ids) if selected_profile == "gpu" else 0),
             "--config",
+            "active_config_file={}".format(config_file),
             "selected_participant={}".format(participant_id),
             "profile={}".format(selected_profile),
             "gpu_devices={}".format(",".join(gpu_ids)),
@@ -194,7 +202,7 @@ def verify_offline_command(config_file: Path, smoke_test: bool) -> None:
     """不发出网络请求，核对 SHA256、源码提交、wheel 缓存和可选烟雾测试。"""
 
     config, root, participants = _context(config_file)
-    manifest = root / "derivatives" / "substain_features" / "tables" / "resource_manifest.tsv"
+    manifest = _derivatives_root(config, root) / "tables" / "resource_manifest.tsv"
     if not manifest.is_file():
         build_manifest(root, manifest)
     verification_root = Path(
@@ -333,7 +341,7 @@ def stage_aggregate_command(config_file: Path, participant_id: str) -> None:
     config, root, participants = _context(config_file)
     selected = select_participants(participants, participant_id)
     details = aggregate_outputs(config, selected)
-    manifest_path = root / "derivatives" / "substain_features" / "tables" / "resource_manifest.tsv"
+    manifest_path = _derivatives_root(config, root) / "tables" / "resource_manifest.tsv"
     build_manifest(root, manifest_path)
     click.echo(json.dumps(details, ensure_ascii=False, indent=2))
 

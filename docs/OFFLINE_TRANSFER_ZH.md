@@ -73,4 +73,7 @@ envs/core-venv/bin/substain-features verify-offline --smoke-test
 ./run_pipeline.sh all all auto 200
 ```
 
+`all`会完成全部病例特征和四张QC图后退出，不启动人工QC。之后可随时运行
+`./run_pipeline.sh qc all`继续可恢复审核；全部审核完成后再运行`export`和`verify`。
+
 DLMUSE资源按非商业科研许可管理。本包仅用于本项目和获得授权的研究工作站，不公开再分发。

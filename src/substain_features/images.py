@@ -90,8 +90,35 @@ def binary_volume_ml(path: Path, positive_label: int = 1) -> float:
 
 
 
-QC_DISPLAY_CONVENTION = "radiological_RAS_canonical"
+QC_DISPLAY_CONVENTION = "radiological_RAS_canonical_standard_axes"
 QC_PANEL_ORDER = ("Coronal", "Sagittal", "Axial")
+QC_SLICE_SELECTION = "max_overlay_voxel_count_per_plane"
+
+
+def _max_overlay_center(mask: np.ndarray) -> Tuple[int, int, int]:
+    """分别选择矢状、冠状和轴位上掩膜体素最多的层面。
+
+    多个层面并列时，选择最靠近掩膜几何中心者；空掩膜回退到图像中心。
+    这样每个正交面都展示最有信息量的层面，不再用一个三维均值坐标同时决定三幅图。
+    """
+
+    values = np.asarray(mask) > 0
+    if values.ndim != 3:
+        raise ValueError("QC切片选择只接受三维数组")
+    nonzero = np.argwhere(values)
+    if nonzero.size == 0:
+        return tuple(int(value) for value in (np.asarray(values.shape) // 2))
+    centroid = nonzero.mean(axis=0)
+    counts = (
+        values.sum(axis=(1, 2)),
+        values.sum(axis=(0, 2)),
+        values.sum(axis=(0, 1)),
+    )
+    selected = []
+    for axis, axis_counts in enumerate(counts):
+        candidates = np.flatnonzero(axis_counts == axis_counts.max())
+        selected.append(int(candidates[np.argmin(np.abs(candidates - centroid[axis]))]))
+    return tuple(selected)
 
 
 def _orthogonal_qc_views(
@@ -105,25 +132,11 @@ def _orthogonal_qc_views(
 
     x, y, z = (int(value) for value in center)
     dx, dy, dz = (float(value) for value in zooms_mm[:3])
-    native_views = (
+    return (
         ("Coronal", np.fliplr(array[:, y, :].T), dz, dx, ("R", "L", "S", "I")),
         ("Sagittal", np.fliplr(array[x, :, :].T), dz, dy, ("A", "P", "S", "I")),
         ("Axial", np.fliplr(array[:, :, z].T), dy, dx, ("R", "L", "A", "P")),
     )
-    rotated = []
-    for name, view, row_mm, column_mm, markers in native_views:
-        left, right, top, bottom = markers
-        # 按项目固定显示习惯，将每个正交子图本身逆时针旋转90度。
-        rotated.append(
-            (
-                name,
-                np.rot90(view, k=1),
-                column_mm,
-                row_mm,
-                (top, bottom, right, left),
-            )
-        )
-    return tuple(rotated)
 
 
 def _view_extent(array: np.ndarray, row_mm: float, column_mm: float) -> Tuple[float, float, float, float]:
@@ -156,8 +169,7 @@ def save_overlay(background_path: Path, overlay_path: Path, output: Path, title:
         overlay_image = resample_from_to(overlay_image, (background_image.shape, background_image.affine), order=0)
     background = background_image.get_fdata()
     overlay = overlay_image.get_fdata()
-    nonzero = np.argwhere(overlay > 0)
-    center = np.asarray(background.shape) // 2 if nonzero.size == 0 else np.rint(nonzero.mean(axis=0)).astype(int)
+    center = _max_overlay_center(overlay)
     zooms = background_image.header.get_zooms()[:3]
     base_views = _orthogonal_qc_views(background, center, zooms)
     overlay_views = _orthogonal_qc_views(overlay, center, zooms)
@@ -203,8 +215,9 @@ def save_dual_overlay(
         overlays.append(image.get_fdata() > 0)
     background = background_image.get_fdata()
     union = overlays[0] | overlays[1]
-    nonzero = np.argwhere(union)
-    center = np.asarray(background.shape) // 2 if nonzero.size == 0 else np.rint(nonzero.mean(axis=0)).astype(int)
+    overlap = overlays[0] & overlays[1]
+    # WMH–病灶图优先展示真正重叠体素最多的层面；无重叠时才回退到联合掩膜。
+    center = _max_overlay_center(overlap if np.any(overlap) else union)
     zooms = background_image.header.get_zooms()[:3]
     base_views = _orthogonal_qc_views(background, center, zooms)
     first_views = _orthogonal_qc_views(overlays[0], center, zooms)

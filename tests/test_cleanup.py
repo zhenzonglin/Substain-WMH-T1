@@ -17,6 +17,8 @@ def test_success_cleanup_keeps_final_outputs_and_removes_rebuildable_files(tmp_p
         return str(path)
 
     kept = {
+        "lesion_t1": make("lesion/lesion_t1.nii.gz"),
+        "lesion_flair": make("lesion/lesion_flair.nii.gz"),
         "seg": make("wmh/seg.nii.gz"),
         "original": make("wmh/contralateral/original.nii.gz"),
         "corrected": make("wmh/contralateral/corrected.nii.gz"),
@@ -28,12 +30,15 @@ def test_success_cleanup_keeps_final_outputs_and_removes_rebuildable_files(tmp_p
     removable = {
         "probability": make("wmh/probability.nii.gz"),
         "warp": make("registration/t1_to_ch2better_1Warp.nii.gz"),
-        "lesion_t1": make("lesion/lesion_t1.nii.gz"),
+        "lesion_ch2better": make("lesion/lesion_ch2better.nii.gz"),
         "donor": make("wmh/contralateral/donor.nii.gz"),
     }
     make("t1/nichart_tool_output/temp_working_dir/scratch.nii.gz")
     write_status(status_path(config, participant, "registration"), "registration", "pass", "A01", {})
-    write_status(status_path(config, participant, "lesion"), "lesion", "pass", "A01", {"lesion_t1": removable["lesion_t1"]})
+    write_status(
+        status_path(config, participant, "lesion"), "lesion", "pass", "A01",
+        {"lesion_t1": kept["lesion_t1"], "lesion_flair": kept["lesion_flair"], "lesion_ch2better": removable["lesion_ch2better"]},
+    )
     write_status(
         status_path(config, participant, "wmh_seg"), "wmh_seg", "pass", "A01",
         {"segmentation": kept["seg"], "probability_map": removable["probability"]},

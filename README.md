@@ -20,10 +20,15 @@ cd /path/to/Substain
 `all`依次执行：
 
 ```text
-prepare → audit → run → qc → export → verify
+prepare → audit → run（全部病例特征、四张QC图和计算完成表）
 ```
 
-人工QC可中断。再次执行`./run_pipeline.sh qc`会回到第一例未完成或已过期的病例。也可分步运行：
+`all`不会启动人工QC，也不会等待人工判读，因此人工QC不影响其余病例继续提取指标。计算结束后，
+`features_computed40.tsv`保存所有计算成功病例。人工QC可在之后任意时间单独启动；它只决定病例是否进入
+SuStaIn正式输入`features_primary40.tsv`。
+
+再次执行`./run_pipeline.sh qc`会回到第一例未完成或已过期的病例。全部审核完成后再执行`export`和
+`verify`。也可分步运行：
 
 ```bash
 ./run_pipeline.sh prepare
@@ -73,10 +78,12 @@ participant_id age sex site_id t1w flair lesion_mask
 → ch2better世界坐标x=0自动对侧WMH替代
 → WMH20与Chung转换
 → DLMUSE、MUSE macro20与GenMIND技术常模
-→ 四图QC
+→ 自动生成四张QC图
 → 成功病例清理可重建中间件
-→ 人工QC门控导出
 ```
+
+上述批量计算链在`features_computed40.tsv`处结束。人工QC是独立的建模纳入步骤；它不会阻断特征提取，
+只在后续`export`时筛选SuStaIn正式输入。
 
 WMH校正不使用固定病灶膨胀。对侧供体发生急性病灶冲突或超出可靠脑区时直接扣除；病灶外WMH逐体素不变。所有WMH体积在原生FLAIR网格中按mL计算。
 
@@ -89,7 +96,7 @@ WMH校正不使用固定病灶膨胀。对侧供体发生急性病灶冲突或�
 3. `WMH_lesion_overlap`
 4. `T1_macro20`
 
-每张图包含冠状位、矢状位和轴位，并将子图逆时针旋转90度。可多选`t1_invalid、flair_invalid、registration_invalid、wmh_failed、macro_failed`；`qc_pass`与失败项互斥。结果每次选择后立即写入`qc_reviews.sqlite`并同步到`qc_reviews.tsv`。QC图或处理状态变化会使旧判定过期。
+每张图按标准临床放射学方向显示冠状位、矢状位和轴位，不再对已经转为RAS的切片追加90度旋转。三个平面分别选择掩膜体素最多的层面；`WMH_lesion_overlap`优先选择实际重叠体素最多的层面，无重叠时回退到两掩膜联合范围。可多选`t1_invalid、flair_invalid、registration_invalid、wmh_failed、macro_failed`；`qc_pass`与失败项互斥。结果每次选择后立即写入`qc_reviews.sqlite`并同步到`qc_reviews.tsv`。QC图或处理状态变化会使旧判定过期。
 
 ## 输出和清理
 
@@ -100,7 +107,7 @@ WMH校正不使用固定病灶膨胀。对侧供体发生急性病灶冲突或�
 - 人工QC：`qc_reviews.sqlite`、`qc_reviews.tsv`
 - 中央图像：`derivatives/substain_features/qc/`
 
-所有病例审核完成前，`export`拒绝生成正式主矩阵。自动处理成功并完成四图生成后，会删除概率图、模板空间临时掩膜、去颅骨强度图、非线性形变场和DLMUSE临时目录；保留最终分割、40维特征、四图、状态、日志、哈希和清理清单。自动处理失败病例保留中间件供诊断。
+`run`和`all`不会调用`export`。所有病例审核完成前，手动执行的`export`会拒绝生成正式主矩阵。自动处理成功并完成四图生成后，会删除概率图、模板空间临时掩膜、去颅骨强度图、非线性形变场和DLMUSE临时目录；保留最终分割、40维特征、四图、状态、日志、哈希和清理清单。自动处理失败病例保留中间件供诊断。
 
 当前旧示例的病灶仍是个体T1空间，因此V1.0会按新契约拒绝它们；替换为FSL MNI152 1/2 mm二值病灶后再运行。详细函数调用见`docs/PROJECT_CODE_GUIDE_ZH.md`。
 

@@ -111,9 +111,9 @@ def main() -> None:
     views = _orthogonal_qc_views(source, (1, 1, 2), (1.0, 2.0, 5.0))
     if [view[0] for view in views] != ["Coronal", "Sagittal", "Axial"]:
         raise AssertionError("QC三正交面顺序错误")
-    if not np.array_equal(views[0][1], np.rot90(np.fliplr(source[:, 1, :].T))):
-        raise AssertionError("QC冠状位未按要求逆时针旋转90度")
-    if [(view[2], view[3]) for view in views] != [(1.0, 5.0), (2.0, 5.0), (1.0, 2.0)]:
+    if not np.array_equal(views[0][1], np.fliplr(source[:, 1, :].T)):
+        raise AssertionError("QC冠状位不是标准临床放射学方向")
+    if [(view[2], view[3]) for view in views] != [(5.0, 1.0), (5.0, 2.0), (2.0, 1.0)]:
         raise AssertionError("QC没有使用真实体素尺寸")
 
     config_text = (ROOT / "config" / "config.yaml").read_text(encoding="utf-8")
@@ -165,7 +165,7 @@ def main() -> None:
         "central_qc_pngs": len(central_qc),
         "scattered_qc_pngs": len(scattered_qc),
         "qc_subjects": qc_subjects,
-        "qc_display_convention": "radiological_RAS_canonical_rotated_ccw_90",
+        "qc_display_convention": "radiological_RAS_canonical_standard_axes",
         "qc_panel_order": ["Coronal", "Sagittal", "Axial"],
         "qc_physical_aspect_from_voxel_spacing_verified": True,
         "lowres_qc_pngs": len([path for path in central_qc if any(tag in path.name for tag in ("_3mm_", "_5mm_", "_6mm_"))]),

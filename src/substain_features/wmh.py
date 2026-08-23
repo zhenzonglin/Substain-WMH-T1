@@ -53,7 +53,9 @@ def run_wmh_synthseg(
         "--save_lesion_probabilities",
     ]
     if device == "cuda":
-        command.append("--crop")
+        # 16 GB 显卡无法容纳官方固定裁剪尺寸的 FP32 3D U-Net；GPU 推理固定使用
+        # FP16，并由运行时在两次前向之间释放显存。CPU 路径仍保持 FP32。
+        command.extend(["--crop", "--gpu_fp16"])
     with log_path.open("w", encoding="utf-8") as log_handle:
         completed = subprocess.run(command, env=env, stdout=log_handle, stderr=subprocess.STDOUT, check=False)
     if completed.returncode != 0 or not output_seg.is_file():

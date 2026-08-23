@@ -4,6 +4,7 @@ import nibabel as nib
 import numpy as np
 
 from substain_features.images import (
+    _max_overlay_center,
     _orthogonal_qc_views,
     resample_continuous_to_reference,
     resample_label_to_reference,
@@ -45,8 +46,19 @@ def test_qc_views_use_radiological_orientation_and_physical_spacing() -> None:
     source = np.arange(2 * 3 * 4).reshape(2, 3, 4)
     views = _orthogonal_qc_views(source, (1, 1, 2), (1.0, 2.0, 5.0))
     assert [view[0] for view in views] == ["Coronal", "Sagittal", "Axial"]
-    np.testing.assert_array_equal(views[0][1], np.rot90(np.fliplr(source[:, 1, :].T)))
-    np.testing.assert_array_equal(views[1][1], np.rot90(np.fliplr(source[1, :, :].T)))
-    np.testing.assert_array_equal(views[2][1], np.rot90(np.fliplr(source[:, :, 2].T)))
-    assert [(view[2], view[3]) for view in views] == [(1.0, 5.0), (2.0, 5.0), (1.0, 2.0)]
-    assert [view[4] for view in views] == [("S", "I", "L", "R"), ("S", "I", "P", "A"), ("A", "P", "L", "R")]
+    np.testing.assert_array_equal(views[0][1], np.fliplr(source[:, 1, :].T))
+    np.testing.assert_array_equal(views[1][1], np.fliplr(source[1, :, :].T))
+    np.testing.assert_array_equal(views[2][1], np.fliplr(source[:, :, 2].T))
+    assert [(view[2], view[3]) for view in views] == [(5.0, 1.0), (5.0, 2.0), (2.0, 1.0)]
+    assert [view[4] for view in views] == [("R", "L", "S", "I"), ("A", "P", "S", "I"), ("R", "L", "A", "P")]
+
+
+def test_qc_slice_selection_uses_maximum_mask_plane() -> None:
+    mask = np.zeros((7, 8, 9), dtype=np.uint8)
+    mask[4, 1:7, 2:8] = 1
+    mask[1:6, 5, 2:8] = 1
+    mask[1:6, 1:7, 6] = 1
+    x, y, z = _max_overlay_center(mask)
+    assert x == int(np.argmax(mask.sum(axis=(1, 2))))
+    assert y == int(np.argmax(mask.sum(axis=(0, 2))))
+    assert z == int(np.argmax(mask.sum(axis=(0, 1))))
