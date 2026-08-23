@@ -1,0 +1,11 @@
+component	commit_or_version	source
+WMH_progression_modeling	1d9c8456168fa8b3a0190c6e91ca3dfbc6c90068	https://github.com/JinyongChung/WMH_progression_modeling
+WMH-SynthSeg	2bf9a421f9707142a83db575ac0f3fa9a2d2631c	https://github.com/lasopablo/freesurfer-freesurfer-dev-mri_WMHsynthseg
+SynthStrip	7.4.1 / 7eb846079b0dc0c92e8313205a3d2387b5c7a354	https://github.com/freesurfer/freesurfer/tree/v7.4.1/mri_synthstrip
+SynthStrip model	1 / 37417f802196186441aae3e7f385d94f8a98c64a88acaeaa2723af995c653e33	https://surfer.nmr.mgh.harvard.edu/docs/synthstrip/requirements/synthstrip.1.pt
+surfa	0.6.3	https://pypi.org/project/surfa/0.6.3/
+DLMUSE	50c59bc1d24b24392305b454a5359eb28eea1aab	https://github.com/CBICA/DLMUSE
+NiChart_DLMUSE	84a977b77243a64f38f2ea0f1423daabe6cfaddd	https://github.com/CBICA/NiChart_DLMUSE
+ANTs	2.5.4	https://github.com/ANTsX/ANTs/releases/tag/v2.5.4
+GenMIND	d1546dc01cf44842a2b30fb71c5118154cecf2e6	https://huggingface.co/spaces/rongguangw/GenMIND
+FSL_MNI152_templates	data_standard / mirror 12444ca65dc12ce5d218012829028e23778ae135	https://git.fmrib.ox.ac.uk/fsl/data_standard

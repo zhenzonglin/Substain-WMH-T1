@@ -1,0 +1,50 @@
+# 受试者数据、身份清单、历史和衍生结果
+BIDS/
+Lesion/
+archive/
+derivatives/
+transfer/
+inputs/bids_links/
+config/participants.tsv
+config/metadata.tsv
+
+# 本机已安装环境、wheel与离线运行产物
+envs/core-venv/
+envs/core-site/
+envs/wmh/
+envs/t1/
+envs/repair-backup/
+envs/offline/*.tar.gz
+envs/*_gpu_probe.json
+wheels/
+offline/
+
+# 大型或受许可限制的第三方资源；私人GitHub不是离线资源分发渠道
+resources/third_party/
+resources/runtime/
+resources/micromamba/
+resources/bootstrap/
+resources/bootstrap-virtualenv-*/
+resources/models/*.pt
+resources/models/*.pth
+resources/normative/*.mat
+resources/normative/*.csv
+resources/normative/genmind_upstream/
+resources/packages/
+resources/tools/
+
+# 运行缓存、日志和打包文件
+*.log
+*.tar
+*.tar.gz
+*.zip
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.snakemake/
+.mypy_cache/
+.ruff_cache/
+.coverage
+*.egg-info/
+build/
+dist/

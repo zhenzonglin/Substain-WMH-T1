@@ -1,0 +1,61 @@
+# 相对于本配置文件所在目录解析，离线迁移后无需改写绝对路径。
+project_version: "1.0"
+project_root: ..
+participants: config/participants.tsv
+derivatives: derivatives/substain_features
+qc_dir: derivatives/substain_features/qc
+default_profile: auto
+input:
+  # bids：读取标准BIDS；folders：分别递归扫描三个根目录。
+  mode: bids
+  bids_root: BIDS
+  t1_root: BIDS
+  flair_root: BIDS
+  lesion_root: Lesion
+  t1_suffix: _T1w.nii.gz
+  flair_suffix: _FLAIR.nii.gz
+  # V1.0只接受FSL MNI152 1/2 mm二值病灶；旧T1空间示例会被拒绝。
+  lesion_suffix: _space-MNI152_desc-acute_mask.nii.gz
+  metadata_tsv: config/metadata.tsv
+  bids_links: inputs/bids_links
+wmh:
+  model: resources/models/WMH-SynthSeg_v10_231110.pth
+  lesion_label: 77
+  atlas: resources/templates/MNI_ch2better_WM_20ROIs.nii.gz
+  template: resources/templates/ch2better.nii.gz
+  residual_info: resources/normative/Residual_Info.mat
+  fsl_mni152_1mm: resources/templates/fsl/MNI152_T1_1mm.nii.gz
+  fsl_mni152_2mm: resources/templates/fsl/MNI152_T1_2mm.nii.gz
+  # 技术QC阈值：自动拦截明显错位，叠加图仍需人工复核。
+  registration_brain_mask_dice_min: 0.70
+  registration_brain_mask_center_distance_max_mm: 15.0
+synthstrip:
+  source_commit: 7eb846079b0dc0c92e8313205a3d2387b5c7a354
+  runtime: resources/tools/synthstrip/mri_synthstrip
+  model: resources/models/synthstrip.1.pt
+  model_version: 1
+  model_sha256: 37417f802196186441aae3e7f385d94f8a98c64a88acaeaa2723af995c653e33
+  border_mm: 1
+t1:
+  macro_mapping: resources/mappings/muse_macro20_v1_provisional.tsv
+  native_mapping: resources/third_party/NiChart_DLMUSE/NiChart_DLMUSE/shared/dicts/MUSE_mapping_consecutive_indices.csv
+  derived_mapping: resources/third_party/NiChart_DLMUSE/NiChart_DLMUSE/shared/dicts/MUSE_mapping_derived_rois.csv
+  normative_profile: genmind_global_v1_provisional
+  genmind_csv: resources/normative/genmind_dataset.csv
+  min_reference_n: 300
+  narrow_age_half_window: 2.5
+  expanded_age_half_window: 5.0
+execution:
+  max_parallel_jobs: 200
+  gpu_policy: auto_one_job_per_device
+  gpu_lock_dir: derivatives/substain_features/.gpu-locks
+  core_python: envs/core-venv/bin/python
+  wmh_python: envs/wmh/bin/python
+  t1_python: envs/t1/bin/python
+  ants_bin: resources/tools/ants-2.5.4/bin
+  device_gpu: cuda
+  device_cpu: cpu
+  lowres_spacings_mm:
+    - [1.0, 1.0, 3.0]
+    - [1.0, 1.0, 5.0]
+    - [1.0, 1.0, 6.0]

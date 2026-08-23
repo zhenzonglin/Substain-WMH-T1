@@ -1,0 +1,10 @@
+name: substain-t1
+channels:
+  - conda-forge
+  - nodefaults
+dependencies:
+  - python=3.10
+  - pip=24.3
+  # 与 WMH 环境保持一致，确保离线环境归档可重复生成。
+  - setuptools=80.9.0
+  - conda-pack=0.8.1

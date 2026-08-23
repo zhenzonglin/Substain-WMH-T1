@@ -1,0 +1,10 @@
+name: substain-wmh
+channels:
+  - conda-forge
+  - nodefaults
+dependencies:
+  - python=3.10
+  - pip=24.3
+  # conda-pack 0.8.1 仍依赖 pkg_resources；固定为 conda 管理的兼容版本，避免 pip 覆盖 conda 元数据。
+  - setuptools=80.9.0
+  - conda-pack=0.8.1

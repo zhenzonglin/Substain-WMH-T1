@@ -1,0 +1,16 @@
+component	version_or_commit	license_or_terms	evidence	redistribution_policy
+WMH_progression_modeling	1d9c8456168fa8b3a0190c6e91ca3dfbc6c90068	no repository-level license found in pinned source	resources/third_party/WMH_progression_modeling	project-internal use only; confirm upstream permission before redistribution
+WMH-SynthSeg	2bf9a421f9707142a83db575ac0f3fa9a2d2631c	no license file found in pinned source	resources/third_party/WMH-SynthSeg	project-internal use only; do not publicly redistribute model/source bundle without confirmation
+SynthStrip program	v7.4.1 / 7eb846079b0dc0c92e8313205a3d2387b5c7a354	FreeSurfer Software License Agreement v1.0	resources/third_party/SynthStrip/LICENSE.txt	retain full agreement and identify runtime modification
+SynthStrip model v1	SHA256 37417f802196186441aae3e7f385d94f8a98c64a88acaeaa2723af995c653e33	MIT option selected from official SynthStrip resource	resources/licenses/SynthStrip_MODEL_MIT.txt	retain copyright and permission notice
+surfa	0.6.3	installed wheel metadata does not declare a license	envs/locks/wmh-pip-lock.txt and installed dist-info	project-internal dependency; confirm upstream terms before public redistribution
+DLMUSE	50c59bc1d24b24392305b454a5359eb28eea1aab	CBICA non-commercial software agreement	resources/third_party/DLMUSE/LICENSE	authorized non-commercial research workstations only
+NiChart_DLMUSE	84a977b77243a64f38f2ea0f1423daabe6cfaddd	CBICA non-commercial software agreement	resources/third_party/NiChart_DLMUSE/LICENSE	authorized non-commercial research workstations only
+DLICV	1.0.5	CBICA non-commercial software agreement	installed package metadata	authorized non-commercial research workstations only
+ANTs	2.5.4	Apache-2.0	https://github.com/ANTsX/ANTs	retain notices and license
+GenMIND	d1546dc01cf44842a2b30fb71c5118154cecf2e6	upstream dataset/model terms require confirmation	resources/normative/genmind_dataset.csv and genmind_upstream/model	project-internal technical normative reference; no public rebundling
+PyTorch-WMH	2.7.1+cu128	BSD-style upstream license	envs/locks/wmh-pip-lock.txt	retain upstream notices
+PyTorch-T1	2.2.1+cpu	BSD-style upstream license	envs/locks/t1-pip-lock.txt	retain upstream notices
+NVIDIA CUDA base image	12.4.1-base-ubuntu20.04	NVIDIA container/CUDA license terms	containers/offline-smoke/Dockerfile	project-internal offline verification only; review NVIDIA terms before redistribution
+Ubuntu runtime packages	20.04	package-specific free/open-source licenses	containers/offline-smoke/Dockerfile	retain package copyright and license notices
+FSL MNI152 templates	data_standard / mirror 12444ca65dc12ce5d218012829028e23778ae135	FSL/MNI template terms	resources/templates/fsl/COPYRIGHTS.txt	retain provenance and copyright notice; project-internal reference use

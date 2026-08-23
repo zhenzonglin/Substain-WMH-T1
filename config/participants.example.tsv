@@ -1,0 +1,2 @@
+participant_id	age	sex	site_id	t1w	flair	lesion_mask
+EXAMPLE001	60	female	SITE01	inputs/bids_links/sub-EXAMPLE001/anat/sub-EXAMPLE001_T1w.nii.gz	inputs/bids_links/sub-EXAMPLE001/anat/sub-EXAMPLE001_FLAIR.nii.gz	/path/to/EXAMPLE001_space-MNI152_desc-acute_mask.nii.gz

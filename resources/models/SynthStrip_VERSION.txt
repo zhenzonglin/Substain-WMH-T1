@@ -1,0 +1,11 @@
+component: FreeSurfer SynthStrip
+program_version: 7.4.1
+source_commit: 7eb846079b0dc0c92e8313205a3d2387b5c7a354
+model_file: synthstrip.1.pt
+model_version: 1
+model_sha256: 37417f802196186441aae3e7f385d94f8a98c64a88acaeaa2723af995c653e33
+default_border_mm: 1
+t1_skullstrip_role: sole_method_no_fallback
+model_download: https://surfer.nmr.mgh.harvard.edu/docs/synthstrip/requirements/synthstrip.1.pt
+program_license: resources/third_party/SynthStrip/LICENSE.txt
+model_license: resources/licenses/SynthStrip_MODEL_MIT.txt

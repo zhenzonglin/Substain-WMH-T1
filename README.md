@@ -1,0 +1,109 @@
+# WMH–T1 40维结构特征工程 V1.0
+
+本项目从每例T1、FLAIR和FSL MNI152空间急性卒中二值病灶生成20个WMH特征与20个T1灰质萎缩特征。本阶段只生成特征和QC，不运行SuStaIn。
+
+## 运行入口
+
+先在`config/config.yaml`中选择`input.mode: bids`或`folders`，配置影像根目录、病灶根目录、三个文件后缀及`config/metadata.tsv`，然后运行：
+
+首次从GitHub clone时先复制元数据模板；真实`metadata.tsv`和自动生成的`participants.tsv`不会提交到GitHub：
+
+```bash
+cp config/metadata.example.tsv config/metadata.tsv
+```
+
+```bash
+cd /path/to/Substain
+./run_pipeline.sh all all auto 200
+```
+
+`all`依次执行：
+
+```text
+prepare → audit → run → qc → export → verify
+```
+
+人工QC可中断。再次执行`./run_pipeline.sh qc`会回到第一例未完成或已过期的病例。也可分步运行：
+
+```bash
+./run_pipeline.sh prepare
+./run_pipeline.sh audit all
+./run_pipeline.sh run all auto 200
+./run_pipeline.sh qc all
+./run_pipeline.sh export all
+./run_pipeline.sh verify
+```
+
+默认总任务并发上限为200。`auto`通过`nvidia-smi`检测GPU，并使用进程锁保证每张GPU一次只运行一个WMH-SynthSeg、SynthStrip或DLMUSE任务；没有GPU时自动使用CPU配置。
+
+## 输入契约
+
+### BIDS模式
+
+递归读取每例唯一的T1w和FLAIR。同一病例可以没有session或只有一个session；软链接视图会展平为无session结构。发现多个session或同一模态多个文件时直接失败。
+
+### folders模式
+
+递归扫描T1、FLAIR和lesion三个根目录。仅删除文件名末尾配置的精确后缀，剩余字符串作为ID；三个模态和`metadata.tsv`必须严格一一对应。
+
+统一输入视图：
+
+```text
+inputs/bids_links/sub-ID/anat/
+├── sub-ID_T1w.nii.gz
+└── sub-ID_FLAIR.nii.gz
+```
+
+原始文件只读。自动生成的`config/participants.tsv`固定为：
+
+```text
+participant_id age sex site_id t1w flair lesion_mask
+```
+
+病灶必须是FSL MNI152标准1 mm或2 mm网格上的严格0/1掩膜。程序核对shape、affine、qform和sform，不根据文件名猜测空间。旧的个体T1空间病灶不再接受，也不会静默转换。
+
+## 处理链
+
+```text
+输入准备和审计
+→ T1/FLAIR固定SynthStrip
+→ T1–FLAIR刚体配准、T1–ch2better配准
+→ MNI152病灶进入ch2better、T1和FLAIR
+→ WMH-SynthSeg
+→ ch2better世界坐标x=0自动对侧WMH替代
+→ WMH20与Chung转换
+→ DLMUSE、MUSE macro20与GenMIND技术常模
+→ 四图QC
+→ 成功病例清理可重建中间件
+→ 人工QC门控导出
+```
+
+WMH校正不使用固定病灶膨胀。对侧供体发生急性病灶冲突或超出可靠脑区时直接扣除；病灶外WMH逐体素不变。所有WMH体积在原生FLAIR网格中按mL计算。
+
+## 四图QC
+
+`substain-features qc`在`127.0.0.1`启动本地网页程序，2×2同时显示：
+
+1. `lesion_on_T1`
+2. `lesion_on_FLAIR`
+3. `WMH_lesion_overlap`
+4. `T1_macro20`
+
+每张图包含冠状位、矢状位和轴位，并将子图逆时针旋转90度。可多选`t1_invalid、flair_invalid、registration_invalid、wmh_failed、macro_failed`；`qc_pass`与失败项互斥。结果每次选择后立即写入`qc_reviews.sqlite`并同步到`qc_reviews.tsv`。QC图或处理状态变化会使旧判定过期。
+
+## 输出和清理
+
+- 计算完成但未人工审核：`features_computed40.tsv`
+- 正式主矩阵：`features_primary40.tsv`，仅包含人工`qc_pass`病例
+- 单模态表：`wmh20_*.tsv`、`t1_*raw.tsv`、`t1_macro20_z_genmind.tsv`
+- 处理QC：`subject_qc.tsv`
+- 人工QC：`qc_reviews.sqlite`、`qc_reviews.tsv`
+- 中央图像：`derivatives/substain_features/qc/`
+
+所有病例审核完成前，`export`拒绝生成正式主矩阵。自动处理成功并完成四图生成后，会删除概率图、模板空间临时掩膜、去颅骨强度图、非线性形变场和DLMUSE临时目录；保留最终分割、40维特征、四图、状态、日志、哈希和清理清单。自动处理失败病例保留中间件供诊断。
+
+当前旧示例的病灶仍是个体T1空间，因此V1.0会按新契约拒绝它们；替换为FSL MNI152 1/2 mm二值病灶后再运行。详细函数调用见`docs/PROJECT_CODE_GUIDE_ZH.md`。
+
+## GitHub边界
+
+GitHub私人仓库用于保存V1.0源码、配置模板、测试和小型参考文件。`BIDS/`、`Lesion/`、`archive/`、`derivatives/`、已安装环境、大型模型/常模和受限制第三方源码不提交。GitHub clone不是完整离线运行包；离线工作站仍需使用已授权的项目资源副本。

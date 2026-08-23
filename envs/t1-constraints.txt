@@ -1,0 +1,6 @@
+# NiChart_DLMUSE 固定提交要求 torch<=2.2.1；DLICV 1.0.5 与此兼容。
+torch==2.2.1+cpu
+nnunetv2==2.5.1
+DLICV==1.0.5
+# GenMIND KDE 混合记录 sklearn 1.2.1/1.2.2；固定到兼容系列的1.2.2。
+scikit-learn==1.2.2
