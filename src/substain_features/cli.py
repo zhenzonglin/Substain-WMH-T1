@@ -2,6 +2,7 @@
 
 import json
 import os
+import shlex
 import subprocess
 import sys
 from pathlib import Path
@@ -195,13 +196,53 @@ def shutil_which(name: str) -> Optional[str]:
     return shutil.which(name)
 
 
+def _resolve_docker_command(configured: Optional[str] = None) -> List[str]:
+    """把容器入口解析为参数数组，支持 ``sudo safe_docker.sh``。"""
+
+    command_text = configured
+    if command_text is None:
+        command_text = os.environ.get("SUBSTAIN_DOCKER_COMMAND", "").strip()
+    if command_text:
+        try:
+            command = shlex.split(command_text)
+        except ValueError as exc:
+            raise ValueError("Docker入口参数无法解析: {}".format(exc)) from exc
+        if not command:
+            raise ValueError("Docker入口不能为空")
+        executable = shutil_which(command[0])
+        if executable is None:
+            raise FileNotFoundError("找不到Docker入口的首个命令: {}".format(command[0]))
+        command[0] = executable
+        return command
+
+    # 若受控脚本在普通用户PATH中可见，按工作站要求通过sudo执行。
+    safe_script = shutil_which("safe_docker.sh")
+    sudo = shutil_which("sudo")
+    if safe_script and sudo:
+        return [sudo, safe_script]
+    safe_wrapper = shutil_which("safe_docker")
+    if safe_wrapper:
+        return [safe_wrapper]
+    docker = shutil_which("docker")
+    if docker:
+        return [docker]
+    raise FileNotFoundError("找不到sudo safe_docker.sh、safe_docker或docker入口")
+
+
 @main.command("verify-offline")
 @click.option("--config-file", type=click.Path(path_type=Path), default=DEFAULT_CONFIG, show_default=True)
 @click.option("--smoke-test", is_flag=True, help="额外运行一例核心烟雾测试；不会联网。")
-def verify_offline_command(config_file: Path, smoke_test: bool) -> None:
+@click.option(
+    "--container-command",
+    default=None,
+    help="容器入口命令；工作站使用引号包围的 'sudo safe_docker.sh'。",
+)
+def verify_offline_command(config_file: Path, smoke_test: bool, container_command: Optional[str]) -> None:
     """不发出网络请求，核对 SHA256、源码提交、wheel 缓存和可选烟雾测试。"""
 
-    config, root, participants = _context(config_file)
+    # 迁移包不携带真实metadata/participants；离线资源核验不应要求受试者清单存在。
+    config = load_config(config_file.resolve())
+    root = Path(str(config["project_root"]))
     manifest = _derivatives_root(config, root) / "tables" / "resource_manifest.tsv"
     if not manifest.is_file():
         build_manifest(root, manifest)
@@ -215,12 +256,26 @@ def verify_offline_command(config_file: Path, smoke_test: bool) -> None:
     report["smoke_test_requested"] = smoke_test
     if smoke_test:
         script = root / "scripts" / "offline_smoke.sh"
-        completed = subprocess.run([str(script)], cwd=str(root), capture_output=True, text=True, check=False)
+        try:
+            docker_command = _resolve_docker_command(container_command)
+        except (FileNotFoundError, ValueError) as exc:
+            raise click.ClickException(str(exc)) from exc
+        completed = subprocess.run(
+            [str(script), "--", *docker_command],
+            cwd=str(root),
+            capture_output=True,
+            text=True,
+            check=False,
+        )
         report["smoke_test_status"] = "pass" if completed.returncode == 0 else "fail"
         report["smoke_test_exit_code"] = completed.returncode
         report["smoke_test_stdout"] = completed.stdout[-4000:]
         report["smoke_test_stderr"] = completed.stderr[-4000:]
-        report["network_isolation"] = "docker_--network_none"
+        command_label = shlex.join(
+            [Path(value).name if index < 2 and value.startswith("/") else value for index, value in enumerate(docker_command)]
+        )
+        report["container_command"] = command_label
+        report["network_isolation"] = "{}_--network_none".format(command_label.replace(" ", "_"))
         report["rebuilt_environment_root"] = str(verification_root / "envs")
         if report["smoke_test_status"] != "pass":
             report["status"] = "fail"

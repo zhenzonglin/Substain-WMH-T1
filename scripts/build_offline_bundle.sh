@@ -18,7 +18,7 @@ fi
 # 打包前先确认当前资源与环境归档没有损坏。
 "${project_root}/run_pipeline.sh" offline
 (cd "${project_root}/envs/offline" && sha256sum -c environment_archives.sha256)
-test -f "${project_root}/wheels/core/substain_features-0.1.0-py3-none-any.whl"
+test -f "${project_root}/wheels/core/substain_features-1.0.0-py3-none-any.whl"
 test -x "${project_root}/resources/tools/ants-2.5.4/bin/antsRegistration"
 
 temporary_archive="$(mktemp --tmpdir="${project_parent}" ".${project_name}_offline.tar.gz.tmp.XXXXXX")"
@@ -41,6 +41,13 @@ exclude_args=(
   "--exclude=${project_name}/archive"
   "--exclude=${project_name}/derivatives"
   "--exclude=${project_name}/transfer"
+  "--exclude=${project_name}/inputs"
+  "--exclude=${project_name}/config/metadata.tsv"
+  "--exclude=${project_name}/config/participants.tsv"
+  "--exclude=${project_name}/.git"
+  "--exclude=${project_name}/build"
+  "--exclude=${project_name}/dist"
+  "--exclude=${project_name}/logs"
   "--exclude=${project_name}/offline/envs"
   "--exclude=${project_name}/offline/matplotlib-cache"
   "--exclude=${project_name}/envs/wmh"

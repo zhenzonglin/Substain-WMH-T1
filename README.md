@@ -37,11 +37,53 @@ SuStaIn正式输入`features_primary40.tsv`。
 ./run_pipeline.sh qc all
 ./run_pipeline.sh export all
 ./run_pipeline.sh verify
+./run_pipeline.sh offline
 ```
+
+`offline`只检查资源完整性。目标工作站需要通过受控Docker入口执行真正禁网烟雾测试时运行：
+
+```bash
+./run_pipeline.sh offline-smoke --container-command 'sudo safe_docker.sh'
+```
+
+容器入口会作为`sudo`和`safe_docker.sh`两个独立参数传递，不会直连Docker socket；容器仍固定使用
+`--network none --gpus all`。其他机器可省略`--container-command`，程序会依次尝试
+`sudo safe_docker.sh`、`safe_docker`和`docker`。
 
 默认总任务并发上限为200。`auto`通过`nvidia-smi`检测GPU，并使用进程锁保证每张GPU一次只运行一个WMH-SynthSeg、SynthStrip或DLMUSE任务；没有GPU时自动使用CPU配置。
 
 ## 输入契约
+
+### 从临床SAS表生成metadata.tsv
+
+项目根目录的`00_make_metadata_c3.py`固定筛选`D_DIAG=1`且
+`H_DEMEN=H_DYSPHR=H_EP=0`，并转换`code_n→participant_id`、
+`GENDER 1/2→male/female`、`AGE→age`、`site_code→site_id`。
+
+先在脚本顶部填写SAS7BDAT、T1汇总文件夹、FLAIR汇总文件夹和lesion汇总文件夹4个路径，
+然后直接运行，不需要命令行参数：
+
+```bash
+envs/core-venv/bin/python 00_make_metadata_c3.py
+```
+
+脚本递归扫描三个文件夹中的NIfTI文件，以每个文件名第一个`_`之前的内容作为ID。它只保留
+同时满足临床条件并且具有唯一T1、FLAIR和lesion文件的患者，直接生成：
+
+```text
+config/metadata.tsv
+config/participants.tsv
+```
+
+两张表已完成匹配，因此运行后不要再执行`prepare`或`all`，以免旧输入准备步骤覆盖结果。后续从
+下面两步开始：
+
+```bash
+./run_pipeline.sh audit all
+./run_pipeline.sh run all auto 200
+```
+
+`site_id`是影像采集中心/医院的稳定代码，当前用于追溯和多中心接口，不进入V1.0特征计算公式。
 
 ### BIDS模式
 

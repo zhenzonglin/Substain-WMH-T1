@@ -101,3 +101,87 @@ def test_all_controller_finishes_computation_without_manual_qc_gate(project_root
     rule_all = snakefile.split("rule all:", 1)[1].split("# 01", 1)[0]
     assert "features_computed40.tsv" in rule_all
     assert "features_primary40.tsv" not in rule_all
+
+
+def test_verify_offline_does_not_require_participants_file(tmp_path: Path, monkeypatch) -> None:
+    """纯资源迁移包在放入正式数据前也必须能够完成离线完整性检查。"""
+
+    config_file = tmp_path / "config.yaml"
+    config_file.write_text("project_root: .\nderivatives: derivatives\n", encoding="utf-8")
+
+    def fake_manifest(root: Path, output: Path) -> None:
+        output.parent.mkdir(parents=True, exist_ok=True)
+        output.write_text("path\tsha256\n", encoding="utf-8")
+
+    monkeypatch.setattr(cli, "build_manifest", fake_manifest)
+    monkeypatch.setattr(cli, "verify_manifest", lambda root, manifest: {"status": "pass"})
+    monkeypatch.setattr(cli, "_context", lambda path: (_ for _ in ()).throw(AssertionError("不应加载participants")))
+
+    result = CliRunner().invoke(
+        cli.main,
+        ["verify-offline", "--config-file", str(config_file)],
+    )
+    assert result.exit_code == 0, result.output
+
+
+def test_docker_command_supports_sudo_safe_docker_script(monkeypatch) -> None:
+    """工作站的sudo safe_docker.sh必须保持为两个独立参数。"""
+
+    monkeypatch.delenv("SUBSTAIN_DOCKER_COMMAND", raising=False)
+    monkeypatch.setattr(
+        cli,
+        "shutil_which",
+        lambda name: {
+            "sudo": "/usr/bin/sudo",
+            "safe_docker.sh": "/usr/local/bin/safe_docker.sh",
+            "docker": "/usr/bin/docker",
+        }.get(name),
+    )
+    assert cli._resolve_docker_command() == ["/usr/bin/sudo", "/usr/local/bin/safe_docker.sh"]
+
+    monkeypatch.setenv("SUBSTAIN_DOCKER_COMMAND", "sudo safe_docker.sh")
+    assert cli._resolve_docker_command() == ["/usr/bin/sudo", "safe_docker.sh"]
+
+
+def test_verify_offline_passes_container_command_as_argv(tmp_path: Path, monkeypatch) -> None:
+    """CLI不得把sudo safe_docker.sh拼成一个不存在的可执行文件。"""
+
+    config_file = tmp_path / "config.yaml"
+    config_file.write_text("project_root: .\nderivatives: derivatives\n", encoding="utf-8")
+    captured = {}
+
+    def fake_manifest(root: Path, output: Path) -> None:
+        output.parent.mkdir(parents=True, exist_ok=True)
+        output.write_text("path\tsha256\n", encoding="utf-8")
+
+    def fake_run(command, **kwargs):
+        captured["command"] = command
+        return SimpleNamespace(returncode=0, stdout="smoke pass", stderr="")
+
+    monkeypatch.setattr(cli, "build_manifest", fake_manifest)
+    monkeypatch.setattr(cli, "verify_manifest", lambda root, manifest: {"status": "pass"})
+    monkeypatch.setattr(cli, "shutil_which", lambda name: "/usr/bin/sudo" if name == "sudo" else None)
+    monkeypatch.setattr(cli.subprocess, "run", fake_run)
+    result = CliRunner().invoke(
+        cli.main,
+        [
+            "verify-offline",
+            "--config-file",
+            str(config_file),
+            "--smoke-test",
+            "--container-command",
+            "sudo safe_docker.sh",
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    assert captured["command"][-3:] == ["--", "/usr/bin/sudo", "safe_docker.sh"]
+    assert '"container_command": "sudo safe_docker.sh"' in result.output
+
+
+def test_offline_smoke_keeps_network_none_and_safe_docker(project_root: Path) -> None:
+    """shell烟雾测试必须保留禁网参数并调用解析后的受控入口。"""
+
+    smoke = (project_root / "scripts" / "offline_smoke.sh").read_text(encoding="utf-8")
+    assert "command -v safe_docker.sh" in smoke
+    assert 'docker_command=("$@")' in smoke
+    assert '"${docker_command[@]}" run --rm --network none --gpus all' in smoke

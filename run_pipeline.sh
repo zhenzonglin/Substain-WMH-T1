@@ -25,13 +25,17 @@ case "${mode}" in
   export) "${root}/scripts/steps/04_export.sh" "${participant}" ;;
   verify) "${root}/scripts/steps/05_verify.sh" ;;
   offline) "${root}/scripts/steps/06_offline_check.sh" ;;
+  offline-smoke)
+    shift
+    "${root}/scripts/steps/06_offline_check.sh" --smoke-test "$@"
+    ;;
   lowres)
     PYTHONPATH="${root}/src" "${root}/envs/core-venv/bin/python" -m substain_features.cli run \
       --config-file "${root}/config/config.yaml" --participant-id "${participant}" \
       --profile "${profile}" --cores "${cores}" --target lowres_validation --skip-prepare
     ;;
   *)
-    echo "用法: ./run_pipeline.sh {all|prepare|audit|run|qc|export|verify|offline|lowres} [participant|all] [auto|gpu|cpu] [max_jobs]" >&2
+    echo "用法: ./run_pipeline.sh {all|prepare|audit|run|qc|export|verify|offline|offline-smoke|lowres} [参数]" >&2
     exit 2
     ;;
 esac
