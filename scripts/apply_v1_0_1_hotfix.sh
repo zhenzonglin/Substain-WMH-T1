@@ -53,7 +53,7 @@ for relative in "${hotfix_files[@]}"; do
   fi
 done
 
-expected_wheel_sha256="9a31a111ae6bfefeac41f1dd27dbb26d1c65ba7a813825e1b38c4da5db505df4"
+expected_wheel_sha256="906dcfff2b57571bdea421b6a49894a71389ab656f3dba67147ef19310bb0453"
 observed_wheel_sha256="$(sha256sum "${source_root}/wheels/core/substain_features-1.0.0-py3-none-any.whl" | awk '{print $1}')"
 if [[ "${observed_wheel_sha256}" != "${expected_wheel_sha256}" ]]; then
   echo "补丁wheel的SHA256不正确: ${observed_wheel_sha256}" >&2

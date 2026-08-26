@@ -95,15 +95,18 @@ def build_manifest(project_root: Path, output: Path) -> pd.DataFrame:
         project_root / "containers",
     ]
     rows = []
-    output_resolved = output.resolve()
+    # 仅转换为绝对路径，禁止resolve符号链接。venv的bin/python通常指向系统解释器；
+    # 若解析链接，路径会逃离envs目录，导致活动或失败环境被错误写入正式清单。
+    output_absolute = output.absolute()
+    final_build_root = (project_root / "wheels" / "final-build").absolute()
     # conda-pack 解包后会合法改写前缀；只校验环境归档/锁文件，不哈希活跃环境目录。
     active_environment_roots = [
-        (project_root / "envs" / name).resolve()
+        (project_root / "envs" / name).absolute()
         for name in ("wmh", "t1", "core-site", "core-venv", "repair-backup")
     ]
     # 失败的core venv与离线打包脚本同样排除；它们可归档但不能成为正式资源依赖。
     active_environment_roots.extend(
-        path.resolve() for path in (project_root / "envs").glob("core-venv.failed-*")
+        path.absolute() for path in (project_root / "envs").glob("core-venv.failed-*")
     )
     for root in include_roots:
         if not root.exists():
@@ -114,12 +117,16 @@ def build_manifest(project_root: Path, output: Path) -> pd.DataFrame:
             if item.is_file()
             and not any(part in {".git", "__pycache__", ".pytest_cache"} for part in item.parts)
         ):
-            if path.resolve() == output_resolved:
+            path_absolute = path.absolute()
+            if path_absolute == output_absolute:
                 continue
             # final-build是联网构建时的临时落点；三套正式wheel目录才进入离线包和清单。
-            if (project_root / "wheels" / "final-build").resolve() in path.resolve().parents:
+            if final_build_root in path_absolute.parents:
                 continue
-            if any(environment_root == path.resolve() or environment_root in path.resolve().parents for environment_root in active_environment_roots):
+            if any(
+                environment_root == path_absolute or environment_root in path_absolute.parents
+                for environment_root in active_environment_roots
+            ):
                 continue
             rows.append(
                 {

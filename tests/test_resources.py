@@ -9,9 +9,16 @@ def test_build_manifest_excludes_active_and_failed_environments(tmp_path: Path) 
     keep = tmp_path / "envs" / "offline" / "environment_archives.sha256"
     active = tmp_path / "envs" / "core-venv" / "bin" / "python"
     failed = tmp_path / "envs" / "core-venv.failed-py312-test" / "bin" / "python3.12"
-    for path in (keep, active, failed):
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text("test\n", encoding="utf-8")
+    keep.parent.mkdir(parents=True)
+    keep.write_text("test\n", encoding="utf-8")
+
+    # venv中的python通常是指向系统解释器的符号链接；排除判断不能跟随该链接。
+    system_python = tmp_path / "system" / "python3.12"
+    system_python.parent.mkdir(parents=True)
+    system_python.write_text("test\n", encoding="utf-8")
+    for path in (active, failed):
+        path.parent.mkdir(parents=True)
+        path.symlink_to(system_python)
 
     output = tmp_path / "derivatives" / "resource_manifest.tsv"
     table = resources.build_manifest(tmp_path, output)
