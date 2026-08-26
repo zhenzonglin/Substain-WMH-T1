@@ -41,7 +41,9 @@ hotfix_files=(
   "scripts/steps/06_offline_check.sh"
   "scripts/verify_offline_package.py"
   "src/substain_features/cli.py"
+  "src/substain_features/resources.py"
   "tests/test_cli.py"
+  "tests/test_resources.py"
   "wheels/core/substain_features-1.0.0-py3-none-any.whl"
 )
 for relative in "${hotfix_files[@]}"; do

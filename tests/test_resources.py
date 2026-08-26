@@ -3,6 +3,25 @@ from pathlib import Path
 from substain_features import resources
 
 
+def test_build_manifest_excludes_active_and_failed_environments(tmp_path: Path) -> None:
+    """正式资源清单不得依赖已解包环境或失败环境中的临时文件。"""
+
+    keep = tmp_path / "envs" / "offline" / "environment_archives.sha256"
+    active = tmp_path / "envs" / "core-venv" / "bin" / "python"
+    failed = tmp_path / "envs" / "core-venv.failed-py312-test" / "bin" / "python3.12"
+    for path in (keep, active, failed):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("test\n", encoding="utf-8")
+
+    output = tmp_path / "derivatives" / "resource_manifest.tsv"
+    table = resources.build_manifest(tmp_path, output)
+    paths = set(table["relative_path"].tolist())
+
+    assert "envs/offline/environment_archives.sha256" in paths
+    assert "envs/core-venv/bin/python" not in paths
+    assert "envs/core-venv.failed-py312-test/bin/python3.12" not in paths
+
+
 def test_git_head_falls_back_to_loose_reference(tmp_path: Path, monkeypatch: object) -> None:
     repository = tmp_path / "repository"
     reference = repository / ".git" / "refs" / "heads" / "main"

@@ -16,6 +16,11 @@ def test_hotfix_updates_only_fixed_files_and_keeps_backup(project_root: Path, tm
     target.mkdir()
     (target / "pyproject.toml").write_text("old project\n", encoding="utf-8")
     (target / "README.md").write_text("old readme\n", encoding="utf-8")
+    (target / "src" / "substain_features").mkdir(parents=True)
+    (target / "src" / "substain_features" / "resources.py").write_text(
+        "# old resource manifest logic\n",
+        encoding="utf-8",
+    )
     (target / "envs" / "offline").mkdir(parents=True)
     (target / "envs" / "offline" / "environment_archives.sha256").write_text("test\n", encoding="utf-8")
     (target / "resources" / "tools").mkdir(parents=True)
@@ -43,8 +48,16 @@ def test_hotfix_updates_only_fixed_files_and_keeps_backup(project_root: Path, tm
     assert (target / "README.md").read_text(encoding="utf-8") == (
         project_root / "README.md"
     ).read_text(encoding="utf-8")
+    assert (target / "src" / "substain_features" / "resources.py").read_text(
+        encoding="utf-8"
+    ) == (project_root / "src" / "substain_features" / "resources.py").read_text(
+        encoding="utf-8"
+    )
     assert (target / "BIDS" / "source-data-marker.txt").read_text(encoding="utf-8") == "unchanged\n"
     backups = list((target / "archive").glob("hotfix-v1.0.1-backup-*"))
     assert len(backups) == 1
     assert (backups[0] / "README.md").read_text(encoding="utf-8") == "old readme\n"
+    assert (
+        backups[0] / "src" / "substain_features" / "resources.py"
+    ).read_text(encoding="utf-8") == "# old resource manifest logic\n"
     assert "V1.0.1热修复已应用" in completed.stdout
