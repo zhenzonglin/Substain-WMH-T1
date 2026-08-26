@@ -19,6 +19,8 @@ def test_snakemake_target_precedes_config_values(project_root: Path, monkeypatch
     monkeypatch.setattr(cli, "shutil_which", lambda name: "/fake/snakemake")
     monkeypatch.setattr(cli, "detect_gpu_ids", lambda: [])
     monkeypatch.setattr(cli.subprocess, "run", fake_run)
+    # 此测试只验证命令参数顺序；离线包按设计不携带真实participants.tsv。
+    monkeypatch.setattr(cli, "_context", lambda path: ({}, project_root, []))
     result = CliRunner().invoke(
         cli.main,
         [
