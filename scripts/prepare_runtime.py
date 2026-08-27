@@ -247,11 +247,8 @@ for name in (
     "prepare_runtime.py",
     "install_full_envs.sh",
     "offline_smoke.sh",
-    "../envs/core-venv/bin/python",
-    "../envs/core-venv/bin/substain-features",
-    "../envs/core-venv/bin/snakemake",
-    "../envs/core-venv/bin/pytest",
 ):
-    path = ROOT / "scripts" / name if not name.startswith("../") else ROOT / name[3:]
+    # 这里只处理项目脚本；虚拟环境入口可能位于只允许执行、不允许 chmod 的共享存储。
+    path = ROOT / "scripts" / name
     path.chmod(path.stat().st_mode | 0o111)
 print("运行时副本已准备：{}".format(runtime))
