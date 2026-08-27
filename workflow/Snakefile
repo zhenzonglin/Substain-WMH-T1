@@ -1,0 +1,238 @@
+"""WMH–T1 40维结构特征的编号化、可重跑DAG。"""
+
+import csv
+from pathlib import Path
+
+configfile: "config/config.yaml"
+
+ROOT = Path(workflow.basedir).resolve().parent
+CONFIG_FILE = Path(config.get("active_config_file", ROOT / "config" / "config.yaml"))
+CONFIG_FILE = CONFIG_FILE if CONFIG_FILE.is_absolute() else (ROOT / CONFIG_FILE).resolve()
+DERIVATIVES = ROOT / config["derivatives"]
+PROFILE = config.get("profile", config.get("default_profile", "gpu"))
+if PROFILE == "auto":
+    # 自动GPU检测由CLI完成；直接调用Snakemake时安全回退CPU。
+    PROFILE = "cpu"
+# Snakemake会把纯数字命令行配置值解析成int；参与者ID一律按字符串匹配。
+SELECTED = str(config.get("selected_participant", "all"))
+GPU_DEVICES = str(config.get("gpu_devices", ""))
+EXECUTION_CONFIG = config.get("execution", {})
+CPU_HEAVY_THREADS = max(1, int(EXECUTION_CONFIG.get("cpu_threads_per_job", 8)))
+
+
+def load_rows():
+    path = ROOT / config["participants"]
+    with path.open("r", encoding="utf-8") as handle:
+        rows = list(csv.DictReader(handle, delimiter="	"))
+    if SELECTED != "all":
+        rows = [row for row in rows if row["participant_id"] == SELECTED]
+    if not rows:
+        raise ValueError("没有匹配的 participant_id: {}".format(SELECTED))
+    return rows
+
+
+ROWS = load_rows()
+PARTICIPANTS = [row["participant_id"] for row in ROWS]
+
+
+def input_path(value):
+    path = Path(value)
+    return str(path if path.is_absolute() else ROOT / path)
+
+
+PARTICIPANT_INPUTS = [
+    input_path(row[column])
+    for row in ROWS
+    for column in ("t1w", "flair", "lesion_mask")
+]
+
+
+def stage_pattern(stage):
+    return str(DERIVATIVES / "sub-{participant}" / "status" / "{}.json".format(stage))
+
+
+CORE = str(ROOT / config["execution"].get("core_python", "envs/core-venv/bin/python"))
+WMH_PYTHON = str(ROOT / config["execution"].get("wmh_python", "envs/wmh/bin/python"))
+T1_PYTHON = str(ROOT / config["execution"].get("t1_python", "envs/t1/bin/python"))
+GPU_LOCK_DIR = str(ROOT / config["execution"].get("gpu_lock_dir", "derivatives/substain_features/.gpu-locks"))
+GPU_PREFIX = (
+    "PYTHONPATH={root}/src {core} -m substain_features.gpu_pool --gpu-ids {devices} "
+    "--lock-dir {locks} -- /usr/bin/env PYTHONPATH={root}/src "
+).format(root=ROOT, core=CORE, devices=GPU_DEVICES, locks=GPU_LOCK_DIR)
+
+
+def execution_command(python, command, needs_gpu=False):
+    direct = "PYTHONPATH={}/src {} {}".format(ROOT, python, command)
+    if PROFILE == "gpu" and needs_gpu:
+        return GPU_PREFIX + "{} {}".format(python, command)
+    return direct
+
+
+def recorded_subject_failure_allowed(command):
+    """允许单例阶段把fail状态交给后续汇总；缺少声明输出时Snakemake仍会失败。"""
+
+    return "({}) || true".format(command)
+
+
+rule all:
+    input:
+        str(DERIVATIVES / "tables" / "features_computed40.tsv"),
+        str(DERIVATIVES / "tables" / "subject_qc.tsv"),
+        str(DERIVATIVES / "tables" / "resource_manifest.tsv"),
+
+
+# 01 输入审计
+rule audit:
+    input:
+        config=str(CONFIG_FILE),
+        participants=input_path(config["participants"]),
+        images=PARTICIPANT_INPUTS,
+    output:
+        str(DERIVATIVES / "audit" / "audit_report.json")
+    shell:
+        "PYTHONPATH={ROOT}/src {CORE} -m substain_features.cli audit --config-file {CONFIG_FILE} --participant-id {SELECTED}"
+
+
+# 02 GPU队列：只执行T1/FLAIR SynthStrip，不在GPU锁内运行ANTs。
+rule skullstrip:
+    input:
+        rules.audit.output
+    output:
+        stage_pattern("skullstrip")
+    wildcard_constraints:
+        participant="|".join(PARTICIPANTS)
+    resources:
+        gpu=1 if PROFILE == "gpu" else 0
+    shell:
+        recorded_subject_failure_allowed(execution_command(CORE, "-m substain_features.cli stage skullstrip --config-file {} --participant-id {{wildcards.participant}} --profile {}".format(CONFIG_FILE, PROFILE), needs_gpu=True))
+
+
+# 03 GPU队列：SynthStrip完成后即可进行WMH-SynthSeg，无需等待CPU配准。
+rule wmh_segmentation:
+    input:
+        stage_pattern("skullstrip")
+    output:
+        stage_pattern("wmh_seg")
+    wildcard_constraints:
+        participant="|".join(PARTICIPANTS)
+    resources:
+        gpu=1 if PROFILE == "gpu" else 0
+    shell:
+        recorded_subject_failure_allowed(execution_command(WMH_PYTHON, "-m substain_features.cli stage wmh-seg --config-file {} --participant-id {{wildcards.participant}} --profile {}".format(CONFIG_FILE, PROFILE), needs_gpu=True))
+
+
+# 04 CPU队列：T1到FLAIR刚体配准、T1到模板与图谱反变换。
+rule registration:
+    input:
+        stage_pattern("skullstrip")
+    output:
+        stage_pattern("registration")
+    wildcard_constraints:
+        participant="|".join(PARTICIPANTS)
+    resources:
+        gpu=0
+    threads: CPU_HEAVY_THREADS
+    shell:
+        recorded_subject_failure_allowed(execution_command(CORE, "-m substain_features.cli stage registration --config-file {} --participant-id {{wildcards.participant}}".format(CONFIG_FILE), needs_gpu=False))
+
+
+# 03 MNI152病灶进入T1，再通过T1到FLAIR刚体矩阵转换
+rule lesion_processing:
+    input:
+        stage_pattern("registration")
+    output:
+        stage_pattern("lesion")
+    wildcard_constraints:
+        participant="|".join(PARTICIPANTS)
+    shell:
+        recorded_subject_failure_allowed("PYTHONPATH={ROOT}/src {CORE} -m substain_features.cli stage lesion --config-file {CONFIG_FILE} --participant-id {{wildcards.participant}}".format(ROOT=ROOT, CORE=CORE, CONFIG_FILE=CONFIG_FILE))
+
+
+# 05 自动对侧WMH替代与20维
+rule wmh:
+    input:
+        lesion=stage_pattern("lesion"),
+        segmentation=stage_pattern("wmh_seg"),
+        registration=stage_pattern("registration"),
+    output:
+        stage_pattern("wmh")
+    wildcard_constraints:
+        participant="|".join(PARTICIPANTS)
+    shell:
+        recorded_subject_failure_allowed("PYTHONPATH={ROOT}/src {WMH_PYTHON} -m substain_features.cli stage wmh --config-file {CONFIG_FILE} --participant-id {{wildcards.participant}} --profile {PROFILE}".format(ROOT=ROOT, WMH_PYTHON=WMH_PYTHON, CONFIG_FILE=CONFIG_FILE, PROFILE=PROFILE))
+
+
+# 06 CPU队列：T1 145/119/20维与技术常模，与GPU排队完全独立。
+rule t1:
+    input:
+        rules.audit.output
+    output:
+        stage_pattern("t1")
+    wildcard_constraints:
+        participant="|".join(PARTICIPANTS)
+    resources:
+        gpu=0
+    threads: CPU_HEAVY_THREADS
+    shell:
+        recorded_subject_failure_allowed(execution_command(T1_PYTHON, "-m substain_features.cli stage t1 --config-file {} --participant-id {{wildcards.participant}} --profile cpu".format(CONFIG_FILE), needs_gpu=False))
+
+
+# 07 自动生成集中QC材料；不包含人工判读，也不门控特征聚合
+rule qc:
+    input:
+        lesion=stage_pattern("lesion"),
+        registration=stage_pattern("registration"),
+        wmh=stage_pattern("wmh"),
+        t1=stage_pattern("t1"),
+    output:
+        stage_pattern("qc")
+    wildcard_constraints:
+        participant="|".join(PARTICIPANTS)
+    shell:
+        recorded_subject_failure_allowed("PYTHONPATH={ROOT}/src {CORE} -m substain_features.cli stage qc --config-file {CONFIG_FILE} --participant-id {{wildcards.participant}}".format(ROOT=ROOT, CORE=CORE, CONFIG_FILE=CONFIG_FILE))
+
+
+# 08 成功病例最小保留清理；失败病例不会触发本规则
+rule cleanup:
+    input:
+        stage_pattern("qc")
+    output:
+        stage_pattern("cleanup")
+    wildcard_constraints:
+        participant="|".join(PARTICIPANTS)
+    shell:
+        recorded_subject_failure_allowed("PYTHONPATH={ROOT}/src {CORE} -m substain_features.cli stage cleanup --config-file {CONFIG_FILE} --participant-id {{wildcards.participant}}".format(ROOT=ROOT, CORE=CORE, CONFIG_FILE=CONFIG_FILE))
+
+
+# 开发期附加验证：不属于正式主链，run_pipeline.sh不提供调用入口
+rule lowres:
+    input:
+        wmh=stage_pattern("wmh"),
+        t1=stage_pattern("t1"),
+    output:
+        stage_pattern("lowres")
+    wildcard_constraints:
+        participant="|".join(PARTICIPANTS)
+    shell:
+        recorded_subject_failure_allowed("PYTHONPATH={ROOT}/src {CORE} -m substain_features.cli stage lowres --config-file {CONFIG_FILE} --participant-id {{wildcards.participant}} --profile {PROFILE}".format(ROOT=ROOT, CORE=CORE, CONFIG_FILE=CONFIG_FILE, PROFILE=PROFILE))
+
+
+rule lowres_validation:
+    input:
+        [str(DERIVATIVES / "sub-{}".format(participant) / "status" / "lowres.json") for participant in PARTICIPANTS]
+
+
+# 09 聚合计算完成表；正式primary40由人工QC后的export命令生成
+rule aggregate:
+    input:
+        [
+            str(DERIVATIVES / "sub-{}".format(participant) / "status" / "{}.json".format(stage))
+            for participant in PARTICIPANTS
+            for stage in ("skullstrip", "lesion", "wmh_seg", "registration", "wmh", "t1", "qc", "cleanup")
+        ]
+    output:
+        computed=str(DERIVATIVES / "tables" / "features_computed40.tsv"),
+        qc=str(DERIVATIVES / "tables" / "subject_qc.tsv"),
+        manifest=str(DERIVATIVES / "tables" / "resource_manifest.tsv"),
+    shell:
+        "PYTHONPATH={ROOT}/src {CORE} -m substain_features.cli stage aggregate --config-file {CONFIG_FILE} --participant-id {SELECTED}"
