@@ -24,6 +24,7 @@ from .pipeline import (
     stage_lowres,
     stage_qc,
     stage_registration,
+    stage_skullstrip,
     stage_t1,
     stage_wmh,
     stage_wmh_segmentation,
@@ -94,7 +95,7 @@ def audit_command(config_file: Path, participant_id: str, allow_fail: bool) -> N
 @click.option("--config-file", type=click.Path(path_type=Path), default=DEFAULT_CONFIG, show_default=True)
 @click.option("--participant-id", default="all", show_default=True)
 @click.option("--profile", type=click.Choice(["auto", "gpu", "cpu"]), default="auto", show_default=True)
-@click.option("--cores", type=click.IntRange(min=1), default=200, show_default=True)
+@click.option("--cores", type=click.IntRange(min=1), default=96, show_default=True)
 @click.option("--target", default="all", show_default=True, help="Snakemake 目标规则。")
 @click.option("--dry-run", is_flag=True)
 @click.option("--skip-prepare", is_flag=True, help="仅供总控脚本或测试在已执行prepare-inputs后使用。")
@@ -115,20 +116,35 @@ def run_command(
         prepare_inputs(initial_config)
     config, root, participants = _context(config_file)
     select_participants(participants, participant_id)
+    cpu_threads_per_job = max(
+        1,
+        int(config.get("execution", {}).get("cpu_threads_per_job", 8)),
+    )
+    # 为一个上游SynthStrip保留CPU空间；其余重型CPU槽优先用于完成
+    # registration -> lesion -> WMH特征，避免DLICV/SynthStrip铺满全部核心。
+    reserved_upstream_threads = (
+        cpu_threads_per_job if cores >= 2 * cpu_threads_per_job else 0
+    )
+    finish_cpu_slots = max(
+        1,
+        (cores - reserved_upstream_threads) // cpu_threads_per_job,
+    )
     gpu_ids = detect_gpu_ids()
     selected_profile = profile
     if profile == "auto":
         selected_profile = "gpu" if gpu_ids else "cpu"
     if selected_profile == "gpu" and not gpu_ids:
         raise click.ClickException("请求GPU配置，但nvidia-smi未检测到可用设备")
-    executable = shutil_which("snakemake")
-    if executable is None:
-        candidate = root / "envs" / "core-venv" / "bin" / "snakemake"
-        executable = str(candidate) if candidate.is_file() else None
-    if executable is None:
-        raise click.ClickException("找不到 Snakemake；先运行 scripts/install_core.sh")
+    # 迁移后的虚拟环境中，console script 的shebang可能仍指向打包机器路径。
+    # 直接使用当前核心Python加载模块，避免依赖不可迁移的bin/snakemake入口。
+    try:
+        import snakemake  # noqa: F401
+    except ImportError as exc:
+        raise click.ClickException("核心Python缺少Snakemake；请重新运行 scripts/install_offline.sh") from exc
     command = [
-        executable,
+        sys.executable,
+        "-m",
+        "snakemake",
         "--snakefile",
         str(root / "workflow" / "Snakefile"),
         "--configfile",
@@ -147,6 +163,8 @@ def run_command(
         [
             "--resources",
             "gpu={}".format(len(gpu_ids) if selected_profile == "gpu" else 0),
+            "finish_cpu={}".format(finish_cpu_slots),
+            "skullstrip_cpu=1",
             "--config",
             "active_config_file={}".format(config_file),
             "selected_participant={}".format(participant_id),
@@ -331,10 +349,18 @@ def stage_lesion_command(config_file: Path, participant_id: str) -> None:
 @stage_group.command("registration")
 @click.option("--config-file", type=click.Path(path_type=Path), required=True)
 @click.option("--participant-id", required=True)
-@click.option("--profile", type=click.Choice(["gpu", "cpu"]), required=True)
-def stage_registration_command(config_file: Path, participant_id: str, profile: str) -> None:
+def stage_registration_command(config_file: Path, participant_id: str) -> None:
     config, _, participant = _single(config_file, participant_id)
-    _run_guarded(config, participant, "registration", lambda: stage_registration(config, participant, profile))
+    _run_guarded(config, participant, "registration", lambda: stage_registration(config, participant))
+
+
+@stage_group.command("skullstrip")
+@click.option("--config-file", type=click.Path(path_type=Path), required=True)
+@click.option("--participant-id", required=True)
+@click.option("--profile", type=click.Choice(["gpu", "cpu"]), required=True)
+def stage_skullstrip_command(config_file: Path, participant_id: str, profile: str) -> None:
+    config, _, participant = _single(config_file, participant_id)
+    _run_guarded(config, participant, "skullstrip", lambda: stage_skullstrip(config, participant, profile))
 
 
 @stage_group.command("wmh-seg")

@@ -13,8 +13,14 @@ PROFILE = config.get("profile", config.get("default_profile", "gpu"))
 if PROFILE == "auto":
     # 自动GPU检测由CLI完成；直接调用Snakemake时安全回退CPU。
     PROFILE = "cpu"
-SELECTED = config.get("selected_participant", "all")
+# Snakemake会把纯数字命令行配置值解析成int；参与者ID一律按字符串匹配。
+SELECTED = str(config.get("selected_participant", "all"))
 GPU_DEVICES = str(config.get("gpu_devices", ""))
+EXECUTION_CONFIG = config.get("execution", {})
+CPU_HEAVY_THREADS = max(1, int(EXECUTION_CONFIG.get("cpu_threads_per_job", 8)))
+
+# 完例优先：GPU WMH最高；CPU按WMH特征反向推进到registration。
+# skullstrip_cpu限制同时只铺开一个新病例，T1在剩余CPU中运行。
 
 
 def load_rows():
@@ -90,32 +96,53 @@ rule audit:
         "PYTHONPATH={ROOT}/src {CORE} -m substain_features.cli audit --config-file {CONFIG_FILE} --participant-id {SELECTED}"
 
 
-# 04 WMH-SynthSeg（等待病灶空间链确认，但不消费病灶数值）
+# 02 CPU队列：T1/FLAIR SynthStrip不申请GPU锁，为WMH-SynthSeg独占GPU。
+rule skullstrip:
+    input:
+        rules.audit.output
+    output:
+        stage_pattern("skullstrip")
+    wildcard_constraints:
+        participant="|".join(PARTICIPANTS)
+    priority: 10
+    resources:
+        gpu=0,
+        skullstrip_cpu=1
+    threads: CPU_HEAVY_THREADS
+    shell:
+        recorded_subject_failure_allowed(execution_command(CORE, "-m substain_features.cli stage skullstrip --config-file {} --participant-id {{wildcards.participant}} --profile cpu".format(CONFIG_FILE), needs_gpu=False))
+
+
+# 03 唯一GPU队列：SynthStrip完成后即可进行WMH-SynthSeg，无需等待CPU配准。
 rule wmh_segmentation:
     input:
-        ancient(stage_pattern("lesion"))
+        stage_pattern("skullstrip")
     output:
         stage_pattern("wmh_seg")
     wildcard_constraints:
         participant="|".join(PARTICIPANTS)
+    priority: 100
     resources:
         gpu=1 if PROFILE == "gpu" else 0
     shell:
         recorded_subject_failure_allowed(execution_command(WMH_PYTHON, "-m substain_features.cli stage wmh-seg --config-file {} --participant-id {{wildcards.participant}} --profile {}".format(CONFIG_FILE, PROFILE), needs_gpu=True))
 
 
-# 02 SynthStrip、T1到FLAIR刚体配准、T1到模板与图谱反变换
+# 04 CPU队列：T1到FLAIR刚体配准、T1到模板与图谱反变换。
 rule registration:
     input:
-        rules.audit.output
+        stage_pattern("skullstrip")
     output:
         stage_pattern("registration")
     wildcard_constraints:
         participant="|".join(PARTICIPANTS)
+    priority: 70
     resources:
-        gpu=1 if PROFILE == "gpu" else 0
+        gpu=0,
+        finish_cpu=1
+    threads: CPU_HEAVY_THREADS
     shell:
-        recorded_subject_failure_allowed(execution_command(CORE, "-m substain_features.cli stage registration --config-file {} --participant-id {{wildcards.participant}} --profile {}".format(CONFIG_FILE, PROFILE), needs_gpu=True))
+        recorded_subject_failure_allowed(execution_command(CORE, "-m substain_features.cli stage registration --config-file {} --participant-id {{wildcards.participant}}".format(CONFIG_FILE), needs_gpu=False))
 
 
 # 03 MNI152病灶进入T1，再通过T1到FLAIR刚体矩阵转换
@@ -126,6 +153,11 @@ rule lesion_processing:
         stage_pattern("lesion")
     wildcard_constraints:
         participant="|".join(PARTICIPANTS)
+    priority: 80
+    resources:
+        gpu=0,
+        finish_cpu=1
+    threads: CPU_HEAVY_THREADS
     shell:
         recorded_subject_failure_allowed("PYTHONPATH={ROOT}/src {CORE} -m substain_features.cli stage lesion --config-file {CONFIG_FILE} --participant-id {{wildcards.participant}}".format(ROOT=ROOT, CORE=CORE, CONFIG_FILE=CONFIG_FILE))
 
@@ -140,23 +172,29 @@ rule wmh:
         stage_pattern("wmh")
     wildcard_constraints:
         participant="|".join(PARTICIPANTS)
+    priority: 90
+    resources:
+        gpu=0,
+        finish_cpu=1
+    threads: CPU_HEAVY_THREADS
     shell:
         recorded_subject_failure_allowed("PYTHONPATH={ROOT}/src {WMH_PYTHON} -m substain_features.cli stage wmh --config-file {CONFIG_FILE} --participant-id {{wildcards.participant}} --profile {PROFILE}".format(ROOT=ROOT, WMH_PYTHON=WMH_PYTHON, CONFIG_FILE=CONFIG_FILE, PROFILE=PROFILE))
 
 
-# 06 T1 145/119/20维与技术常模
+# 06 CPU队列：T1 145/119/20维与技术常模，与GPU排队完全独立。
 rule t1:
     input:
-        # 病灶仅用于保证流程排序和后续QC，不进入DLMUSE体积计算；更新时间不能触发T1重算。
-        lesion=ancient(stage_pattern("lesion"))
+        rules.audit.output
     output:
         stage_pattern("t1")
     wildcard_constraints:
         participant="|".join(PARTICIPANTS)
+    priority: 5
     resources:
-        gpu=1 if PROFILE == "gpu" else 0
+        gpu=0
+    threads: CPU_HEAVY_THREADS
     shell:
-        recorded_subject_failure_allowed(execution_command(T1_PYTHON, "-m substain_features.cli stage t1 --config-file {} --participant-id {{wildcards.participant}} --profile {}".format(CONFIG_FILE, PROFILE), needs_gpu=True))
+        recorded_subject_failure_allowed(execution_command(T1_PYTHON, "-m substain_features.cli stage t1 --config-file {} --participant-id {{wildcards.participant}} --profile cpu".format(CONFIG_FILE), needs_gpu=False))
 
 
 # 07 自动生成集中QC材料；不包含人工判读，也不门控特征聚合
@@ -170,6 +208,7 @@ rule qc:
         stage_pattern("qc")
     wildcard_constraints:
         participant="|".join(PARTICIPANTS)
+    priority: 60
     shell:
         recorded_subject_failure_allowed("PYTHONPATH={ROOT}/src {CORE} -m substain_features.cli stage qc --config-file {CONFIG_FILE} --participant-id {{wildcards.participant}}".format(ROOT=ROOT, CORE=CORE, CONFIG_FILE=CONFIG_FILE))
 
@@ -182,11 +221,12 @@ rule cleanup:
         stage_pattern("cleanup")
     wildcard_constraints:
         participant="|".join(PARTICIPANTS)
+    priority: 50
     shell:
         recorded_subject_failure_allowed("PYTHONPATH={ROOT}/src {CORE} -m substain_features.cli stage cleanup --config-file {CONFIG_FILE} --participant-id {{wildcards.participant}}".format(ROOT=ROOT, CORE=CORE, CONFIG_FILE=CONFIG_FILE))
 
 
-# 附加验证：不属于默认主链
+# 开发期附加验证：不属于正式主链，run_pipeline.sh不提供调用入口
 rule lowres:
     input:
         wmh=stage_pattern("wmh"),
@@ -210,7 +250,7 @@ rule aggregate:
         [
             str(DERIVATIVES / "sub-{}".format(participant) / "status" / "{}.json".format(stage))
             for participant in PARTICIPANTS
-            for stage in ("lesion", "wmh_seg", "registration", "wmh", "t1", "qc", "cleanup")
+            for stage in ("skullstrip", "lesion", "wmh_seg", "registration", "wmh", "t1", "qc", "cleanup")
         ]
     output:
         computed=str(DERIVATIVES / "tables" / "features_computed40.tsv"),
