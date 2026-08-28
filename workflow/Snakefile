@@ -20,7 +20,7 @@ EXECUTION_CONFIG = config.get("execution", {})
 CPU_HEAVY_THREADS = max(1, int(EXECUTION_CONFIG.get("cpu_threads_per_job", 8)))
 
 # 完例优先：GPU WMH最高；CPU按WMH特征反向推进到registration。
-# skullstrip_cpu限制同时只铺开一个新病例，T1在剩余CPU中运行。
+# skullstrip_cpu限制同时最多铺开两个新病例，T1在剩余CPU中运行。
 
 
 def load_rows():
