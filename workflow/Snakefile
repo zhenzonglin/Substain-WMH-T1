@@ -20,7 +20,7 @@ EXECUTION_CONFIG = config.get("execution", {})
 CPU_HEAVY_THREADS = max(1, int(EXECUTION_CONFIG.get("cpu_threads_per_job", 8)))
 
 # 严格完例优先：越接近cleanup的阶段优先级越高。
-# WMH-SynthSeg仍独占GPU，但不会挤占下游CPU配额；T1在WMH特征后进入CPU队列。
+# CPU重任务仅由总核心数和threads动态调度；WMH-SynthSeg独占GPU并优先获得新释放的核心。
 
 
 def load_rows():
@@ -92,6 +92,8 @@ rule audit:
         images=PARTICIPANT_INPUTS,
     output:
         str(DERIVATIVES / "audit" / "audit_report.json")
+    resources:
+        gpu=0
     shell:
         "PYTHONPATH={ROOT}/src {CORE} -m substain_features.cli audit --config-file {CONFIG_FILE} --participant-id {SELECTED}"
 
@@ -106,8 +108,7 @@ rule skullstrip:
         participant="|".join(PARTICIPANTS)
     priority: 10
     resources:
-        gpu=0,
-        skullstrip_cpu=1
+        gpu=0
     threads: CPU_HEAVY_THREADS
     shell:
         recorded_subject_failure_allowed(execution_command(CORE, "-m substain_features.cli stage skullstrip --config-file {} --participant-id {{wildcards.participant}} --profile cpu".format(CONFIG_FILE), needs_gpu=False))
@@ -121,7 +122,7 @@ rule wmh_segmentation:
         stage_pattern("wmh_seg")
     wildcard_constraints:
         participant="|".join(PARTICIPANTS)
-    priority: 145
+    priority: 165
     resources:
         gpu=1 if PROFILE == "gpu" else 0
     shell:
@@ -138,8 +139,7 @@ rule registration:
         participant="|".join(PARTICIPANTS)
     priority: 120
     resources:
-        gpu=0,
-        finish_cpu=1
+        gpu=0
     threads: CPU_HEAVY_THREADS
     shell:
         recorded_subject_failure_allowed(execution_command(CORE, "-m substain_features.cli stage registration --config-file {} --participant-id {{wildcards.participant}}".format(CONFIG_FILE), needs_gpu=False))
@@ -155,8 +155,7 @@ rule lesion_processing:
         participant="|".join(PARTICIPANTS)
     priority: 130
     resources:
-        gpu=0,
-        finish_cpu=1
+        gpu=0
     threads: CPU_HEAVY_THREADS
     shell:
         recorded_subject_failure_allowed("PYTHONPATH={ROOT}/src {CORE} -m substain_features.cli stage lesion --config-file {CONFIG_FILE} --participant-id {{wildcards.participant}}".format(ROOT=ROOT, CORE=CORE, CONFIG_FILE=CONFIG_FILE))
@@ -174,8 +173,7 @@ rule wmh:
         participant="|".join(PARTICIPANTS)
     priority: 140
     resources:
-        gpu=0,
-        finish_cpu=1
+        gpu=0
     threads: CPU_HEAVY_THREADS
     shell:
         recorded_subject_failure_allowed("PYTHONPATH={ROOT}/src {WMH_PYTHON} -m substain_features.cli stage wmh --config-file {CONFIG_FILE} --participant-id {{wildcards.participant}} --profile {PROFILE}".format(ROOT=ROOT, WMH_PYTHON=WMH_PYTHON, CONFIG_FILE=CONFIG_FILE, PROFILE=PROFILE))
@@ -192,8 +190,7 @@ rule t1:
         participant="|".join(PARTICIPANTS)
     priority: 150
     resources:
-        gpu=0,
-        t1_cpu=1
+        gpu=0
     threads: CPU_HEAVY_THREADS
     shell:
         recorded_subject_failure_allowed(execution_command(T1_PYTHON, "-m substain_features.cli stage t1 --config-file {} --participant-id {{wildcards.participant}} --profile cpu".format(CONFIG_FILE), needs_gpu=False))
@@ -211,6 +208,8 @@ rule qc:
     wildcard_constraints:
         participant="|".join(PARTICIPANTS)
     priority: 160
+    resources:
+        gpu=0
     shell:
         recorded_subject_failure_allowed("PYTHONPATH={ROOT}/src {CORE} -m substain_features.cli stage qc --config-file {CONFIG_FILE} --participant-id {{wildcards.participant}}".format(ROOT=ROOT, CORE=CORE, CONFIG_FILE=CONFIG_FILE))
 
@@ -224,6 +223,8 @@ rule cleanup:
     wildcard_constraints:
         participant="|".join(PARTICIPANTS)
     priority: 170
+    resources:
+        gpu=0
     shell:
         recorded_subject_failure_allowed("PYTHONPATH={ROOT}/src {CORE} -m substain_features.cli stage cleanup --config-file {CONFIG_FILE} --participant-id {{wildcards.participant}}".format(ROOT=ROOT, CORE=CORE, CONFIG_FILE=CONFIG_FILE))
 
@@ -237,6 +238,8 @@ rule lowres:
         stage_pattern("lowres")
     wildcard_constraints:
         participant="|".join(PARTICIPANTS)
+    resources:
+        gpu=0
     shell:
         recorded_subject_failure_allowed("PYTHONPATH={ROOT}/src {CORE} -m substain_features.cli stage lowres --config-file {CONFIG_FILE} --participant-id {{wildcards.participant}} --profile {PROFILE}".format(ROOT=ROOT, CORE=CORE, CONFIG_FILE=CONFIG_FILE, PROFILE=PROFILE))
 
@@ -258,5 +261,7 @@ rule aggregate:
         computed=str(DERIVATIVES / "tables" / "features_computed40.tsv"),
         qc=str(DERIVATIVES / "tables" / "subject_qc.tsv"),
         manifest=str(DERIVATIVES / "tables" / "resource_manifest.tsv"),
+    resources:
+        gpu=0
     shell:
         "PYTHONPATH={ROOT}/src {CORE} -m substain_features.cli stage aggregate --config-file {CONFIG_FILE} --participant-id {SELECTED}"

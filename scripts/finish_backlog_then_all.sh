@@ -23,31 +23,17 @@ config="${root}/config/config.yaml"
 core_python="${root}/envs/core-venv/bin/python"
 snakefile="${root}/workflow/Snakefile"
 derivatives="${root}/derivatives/substain_features"
-targets_file="${root}/logs/backlog_cleanup_targets_v1.0.7.txt"
-participants_file="${root}/logs/backlog_participants_v1.0.7.txt"
-remaining_targets_file="${root}/logs/wave_cleanup_targets_v1.0.7.txt"
-remaining_participants_file="${root}/logs/wave_participants_v1.0.7.txt"
-archive_root="${root}/archive/interrupted-status-before-v1.0.7-$(date +%Y%m%d_%H%M%S)"
+targets_file="${root}/logs/backlog_cleanup_targets_v1.0.8.txt"
+participants_file="${root}/logs/backlog_participants_v1.0.8.txt"
+remaining_targets_file="${root}/logs/wave_cleanup_targets_v1.0.8.txt"
+remaining_participants_file="${root}/logs/wave_participants_v1.0.8.txt"
+archive_root="${root}/archive/interrupted-status-before-v1.0.8-$(date +%Y%m%d_%H%M%S)"
 
 mkdir -p "${root}/logs"
 cd "${root}"
 
-# 96核正式配置：8个finish重任务、2个T1、1个SynthStrip、1个GPU调度线程，
-# 共使用最多89核；剩余核心供短QC/cleanup和系统使用。低于25核时无法同时保留三类CPU槽。
-gpu_control_threads=1
-skullstrip_slots=1
-if (( cores >= gpu_control_threads + 4 * cpu_threads )); then
-  t1_slots=2
-else
-  t1_slots=1
-fi
-reserved_threads=$((gpu_control_threads + (skullstrip_slots + t1_slots) * cpu_threads))
-finish_cpu_slots=$(((cores - reserved_threads) / cpu_threads))
-if (( finish_cpu_slots < 1 )); then
-  minimum_cores=$((gpu_control_threads + 3 * cpu_threads))
-  echo "严格完例调度至少需要${minimum_cores}核（当前${cores}核）" >&2
-  exit 2
-fi
+# CPU重任务不再划分固定阶段槽；Snakemake依据总核心数、每例线程数和优先级
+# 动态填充空闲核心。GPU仍由唯一资源令牌和进程锁串行化。
 
 export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0}"
 export OMP_NUM_THREADS="${OMP_NUM_THREADS:-${cpu_threads}}"
@@ -144,7 +130,7 @@ else
   backlog_wave_count=0
 fi
 
-echo "严格调度资源: cores=${cores}, finish_cpu=${finish_cpu_slots}, skullstrip_cpu=${skullstrip_slots}, t1_cpu=${t1_slots}, gpu=1"
+echo "严格调度资源: cores=${cores}, heavy_threads=${cpu_threads}, cpu_custom_caps=none, gpu=1"
 echo "积压严格波次: batch_size=${batch_size}, backlog=${backlog_count}, waves=${backlog_wave_count}"
 
 print_wave_plan() {
@@ -185,9 +171,6 @@ run_wave() {
     "${wave_targets[@]}" \
     --resources \
     "gpu=1" \
-    "finish_cpu=${finish_cpu_slots}" \
-    "skullstrip_cpu=${skullstrip_slots}" \
-    "t1_cpu=${t1_slots}" \
     --config \
     "active_config_file=${config}" \
     "selected_participant=all" \

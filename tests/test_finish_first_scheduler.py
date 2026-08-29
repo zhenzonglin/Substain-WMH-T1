@@ -60,7 +60,7 @@ def test_priorities_strictly_finish_subjects_before_opening_upstream(project_roo
         "cleanup": 170,
         "qc": 160,
         "t1": 150,
-        "wmh_segmentation": 145,
+        "wmh_segmentation": 165,
         "wmh": 140,
         "lesion_processing": 130,
         "registration": 120,
@@ -75,7 +75,26 @@ def test_t1_uses_wmh_as_ancient_scheduler_gate(project_root: Path) -> None:
     t1_rule = _rule_body(snakefile, "t1")
     assert 'wmh=ancient(stage_pattern("wmh"))' in t1_rule
     assert "rules.audit.output" not in t1_rule
-    assert "t1_cpu=1" in t1_rule
+    assert "t1_cpu" not in t1_rule
+    assert "gpu=0" in t1_rule
+
+
+def test_cpu_heavy_rules_share_only_the_global_core_pool(project_root: Path) -> None:
+    snakefile = (project_root / "workflow" / "Snakefile").read_text(encoding="utf-8")
+    for rule in ("skullstrip", "registration", "lesion_processing", "wmh", "t1"):
+        body = _rule_body(snakefile, rule)
+        assert "threads: CPU_HEAVY_THREADS" in body
+        assert "gpu=0" in body
+        assert "finish_cpu" not in body
+        assert "skullstrip_cpu" not in body
+        assert "t1_cpu" not in body
+
+    assert "gpu=1 if PROFILE == \"gpu\" else 0" in _rule_body(
+        snakefile, "wmh_segmentation"
+    )
+    assert "finish_cpu" not in snakefile
+    assert "skullstrip_cpu" not in snakefile
+    assert "t1_cpu" not in snakefile
 
 
 def test_full_gpu_entry_uses_strict_scheduler_but_single_subject_stays_direct(project_root: Path) -> None:
@@ -106,7 +125,7 @@ def test_backlog_and_new_subjects_both_use_cleanup_bounded_waves(project_root: P
 
 
 @requires_posix_shell
-def test_strict_resource_partition_is_8_finish_2_t1_1_skullstrip_at_96_cores(
+def test_strict_scheduler_uses_only_global_cores_and_one_gpu_token(
     project_root: Path, tmp_path: Path
 ) -> None:
     completed = _test_scheduler(
@@ -116,9 +135,16 @@ def test_strict_resource_partition_is_8_finish_2_t1_1_skullstrip_at_96_cores(
     )
     assert completed.returncode == 0, completed.stdout + completed.stderr
     assert (
-        "严格调度资源: cores=96, finish_cpu=8, skullstrip_cpu=1, t1_cpu=2, gpu=1"
+        "严格调度资源: cores=96, heavy_threads=8, cpu_custom_caps=none, gpu=1"
         in completed.stdout
     )
+    script = (project_root / "scripts" / "finish_backlog_then_all.sh").read_text(
+        encoding="utf-8"
+    )
+    assert '"gpu=1"' in script
+    assert "finish_cpu" not in script
+    assert "skullstrip_cpu" not in script
+    assert "t1_cpu" not in script
 
 
 @requires_posix_shell
@@ -137,7 +163,7 @@ def test_backlog_orders_closest_subjects_and_preserves_real_failures(
     completed = _test_scheduler(project_root, root, statuses)
     assert completed.returncode == 0, completed.stdout + completed.stderr
 
-    participants = (root / "logs" / "backlog_participants_v1.0.7.txt").read_text(
+    participants = (root / "logs" / "backlog_participants_v1.0.8.txt").read_text(
         encoding="utf-8"
     ).splitlines()
     assert participants == ["E", "B", "C", "A"]
