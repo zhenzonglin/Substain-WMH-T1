@@ -23,28 +23,30 @@ config="${root}/config/config.yaml"
 core_python="${root}/envs/core-venv/bin/python"
 snakefile="${root}/workflow/Snakefile"
 derivatives="${root}/derivatives/substain_features"
-targets_file="${root}/logs/backlog_cleanup_targets_v1.0.5.txt"
-participants_file="${root}/logs/backlog_participants_v1.0.5.txt"
-remaining_targets_file="${root}/logs/wave_cleanup_targets_v1.0.6.txt"
-remaining_participants_file="${root}/logs/wave_participants_v1.0.6.txt"
-archive_root="${root}/archive/interrupted-status-before-backlog-$(date +%Y%m%d_%H%M%S)"
+targets_file="${root}/logs/backlog_cleanup_targets_v1.0.7.txt"
+participants_file="${root}/logs/backlog_participants_v1.0.7.txt"
+remaining_targets_file="${root}/logs/wave_cleanup_targets_v1.0.7.txt"
+remaining_participants_file="${root}/logs/wave_participants_v1.0.7.txt"
+archive_root="${root}/archive/interrupted-status-before-v1.0.7-$(date +%Y%m%d_%H%M%S)"
 
 mkdir -p "${root}/logs"
 cd "${root}"
 
-if (( cores >= 3 * cpu_threads )); then
-  skullstrip_slots=2
-else
-  skullstrip_slots=1
-fi
-t1_slots=1
-if (( cores >= 2 * cpu_threads )); then
+# 96核正式配置：8个finish重任务、2个T1、1个SynthStrip、1个GPU调度线程，
+# 共使用最多89核；剩余核心供短QC/cleanup和系统使用。低于25核时无法同时保留三类CPU槽。
+gpu_control_threads=1
+skullstrip_slots=1
+if (( cores >= gpu_control_threads + 4 * cpu_threads )); then
   t1_slots=2
+else
+  t1_slots=1
 fi
-reserved_threads=$((skullstrip_slots * cpu_threads))
+reserved_threads=$((gpu_control_threads + (skullstrip_slots + t1_slots) * cpu_threads))
 finish_cpu_slots=$(((cores - reserved_threads) / cpu_threads))
 if (( finish_cpu_slots < 1 )); then
-  finish_cpu_slots=1
+  minimum_cores=$((gpu_control_threads + 3 * cpu_threads))
+  echo "严格完例调度至少需要${minimum_cores}核（当前${cores}核）" >&2
+  exit 2
 fi
 
 export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0}"
@@ -75,11 +77,6 @@ def load_status(path):
         return None
 
 
-def is_pass(path):
-    status = load_status(path)
-    return bool(status and status.get("status") == "pass")
-
-
 # 仅归档明确由中断产生的fail状态；真实分析失败保持原样。
 interruption_markers = (
     "exit=-15",
@@ -103,49 +100,89 @@ for status_path in sorted(derivatives.glob("sub-*/status/*.json")):
     shutil.move(str(status_path), str(destination))
     archived += 1
 
-targets = []
-participants = []
+# 已有任一有效阶段状态的病例均属于积压。按缺失阶段数、最深阶段、ID排序，
+# 使最接近cleanup的病例先进入固定波次。pass和真实fail都算已物化状态。
+progress_stages = ("skullstrip", "wmh_seg", "registration", "lesion", "wmh", "t1", "qc")
+stage_depth = {stage: index for index, stage in enumerate(progress_stages, start=1)}
+records = []
 for subject_dir in sorted(derivatives.glob("sub-*")):
     status_dir = subject_dir / "status"
-    # 冻结所有已有任一成功阶段、但尚未完成cleanup的病例；包括只有
-    # skullstrip、只有T1或已完成WMH-SynthSeg的旧积压，不再只挑某一种形态。
-    progress_stages = ("skullstrip", "wmh_seg", "registration", "lesion", "wmh", "t1", "qc")
-    if not any(is_pass(status_dir / "{}.json".format(stage)) for stage in progress_stages):
-        continue
     cleanup = status_dir / "cleanup.json"
     if cleanup.exists():
         continue
-    targets.append(str(cleanup))
-    participants.append(subject_dir.name[4:])
+    materialized = {
+        stage: load_status(status_dir / "{}.json".format(stage))
+        for stage in progress_stages
+    }
+    materialized = {stage: status for stage, status in materialized.items() if status is not None}
+    if not materialized:
+        continue
+    missing_count = len(progress_stages) - len(materialized)
+    deepest_stage = max(stage_depth[stage] for stage in materialized)
+    participant_id = subject_dir.name[4:]
+    records.append((missing_count, -deepest_stage, participant_id, str(cleanup)))
 
+records.sort(key=lambda record: (record[0], record[1], record[2]))
 targets_file.write_text(
-    "".join("{}\n".format(target) for target in targets),
+    "".join("{}\n".format(record[3]) for record in records),
     encoding="utf-8",
 )
 participants_file.write_text(
-    "".join("{}\n".format(participant) for participant in participants),
+    "".join("{}\n".format(record[2]) for record in records),
     encoding="utf-8",
 )
 print("归档的明确中断fail状态数: {}".format(archived))
-print("冻结积压病例数: {}".format(len(targets)))
+print("排序后的积压病例数: {}".format(len(records)))
 print("积压名单: {}".format(participants_file))
 PY
 
-mapfile -t targets < "${targets_file}"
-echo "积压阶段资源: cores=${cores}, finish_cpu=${finish_cpu_slots}, skullstrip_cpu=${skullstrip_slots}, t1_cpu=${t1_slots}, gpu=1"
+mapfile -t backlog_targets < "${targets_file}"
+backlog_count=${#backlog_targets[@]}
+if (( backlog_count > 0 )); then
+  backlog_wave_count=$(((backlog_count + batch_size - 1) / batch_size))
+else
+  backlog_wave_count=0
+fi
+
+echo "严格调度资源: cores=${cores}, finish_cpu=${finish_cpu_slots}, skullstrip_cpu=${skullstrip_slots}, t1_cpu=${t1_slots}, gpu=1"
+echo "积压严格波次: batch_size=${batch_size}, backlog=${backlog_count}, waves=${backlog_wave_count}"
+
+print_wave_plan() {
+  local phase="$1"
+  local total="$2"
+  local wave_count="$3"
+  local offset wave size
+  for ((offset = 0, wave = 1; offset < total; offset += batch_size, wave += 1)); do
+    size=$((total - offset))
+    if (( size > batch_size )); then
+      size=${batch_size}
+    fi
+    echo "计划${phase}波次 ${wave}/${wave_count}: ${size}例"
+  done
+}
 
 if [[ "${BACKLOG_LIST_ONLY:-0}" == "1" ]]; then
+  print_wave_plan "积压" "${backlog_count}" "${backlog_wave_count}"
   exit 0
 fi
 
-if (( ${#targets[@]} > 0 )); then
+run_wave() {
+  local phase="$1"
+  local wave="$2"
+  local wave_count="$3"
+  shift 3
+  local wave_targets=("$@")
+  local missing=0
+  local target
+
+  echo "[$(date -Is)] 开始${phase}波次 ${wave}/${wave_count}: ${#wave_targets[@]}例；全部产生cleanup状态后才进入下一波。"
   PYTHONPATH="${root}/src" "${core_python}" -m snakemake \
     --snakefile "${snakefile}" \
     --configfile "${config}" \
     --cores "${cores}" \
     --keep-going \
     --printshellcmds \
-    "${targets[@]}" \
+    "${wave_targets[@]}" \
     --resources \
     "gpu=1" \
     "finish_cpu=${finish_cpu_slots}" \
@@ -156,9 +193,26 @@ if (( ${#targets[@]} > 0 )); then
     "selected_participant=all" \
     "profile=gpu" \
     "gpu_devices=0"
-fi
 
-echo "冻结积压病例已产生完整状态链；生成剩余病例的固定波次名单。"
+  for target in "${wave_targets[@]}"; do
+    if [[ ! -f "${target}" ]]; then
+      echo "波次结束但缺少cleanup状态: ${target}" >&2
+      missing=$((missing + 1))
+    fi
+  done
+  if (( missing > 0 )); then
+    echo "${phase}波次 ${wave}/${wave_count} 未完整结束，停止开放下一波（缺少${missing}例）。" >&2
+    return 1
+  fi
+  echo "[$(date -Is)] 完成${phase}波次 ${wave}/${wave_count}。"
+}
+
+for ((offset = 0, wave = 1; offset < backlog_count; offset += batch_size, wave += 1)); do
+  backlog_wave_targets=("${backlog_targets[@]:offset:batch_size}")
+  run_wave "积压" "${wave}" "${backlog_wave_count}" "${backlog_wave_targets[@]}"
+done
+
+echo "全部积压波次已产生cleanup状态；生成从未启动病例的固定波次名单。"
 
 PYTHONPATH="${root}/src" "${core_python}" - \
   "${config}" \
@@ -188,7 +242,7 @@ participant_ids = []
 for participant in participants:
     status_dir = derivatives / "sub-{}".format(participant.participant_id) / "status"
     cleanup = status_dir / "cleanup.json"
-    # pass和真实fail状态都视为已处理；只有缺失状态才进入后续波次。
+    # pass和真实fail状态都视为已处理；只有缺失cleanup状态才进入后续波次。
     if cleanup.exists():
         continue
     targets.append(str(cleanup))
@@ -202,41 +256,25 @@ participants_file.write_text(
     "".join("{}\n".format(participant_id) for participant_id in participant_ids),
     encoding="utf-8",
 )
-print("冻结积压完成后的剩余病例数: {}".format(len(targets)))
-print("剩余病例名单: {}".format(participants_file))
+print("积压完成后的未处理病例数: {}".format(len(targets)))
+print("未处理病例名单: {}".format(participants_file))
 PY
 
 mapfile -t remaining_targets < "${remaining_targets_file}"
 remaining_count=${#remaining_targets[@]}
 if (( remaining_count > 0 )); then
-  wave_count=$(((remaining_count + batch_size - 1) / batch_size))
+  remaining_wave_count=$(((remaining_count + batch_size - 1) / batch_size))
 else
-  wave_count=0
+  remaining_wave_count=0
 fi
-echo "200例波次阶段: batch_size=${batch_size}, remaining=${remaining_count}, waves=${wave_count}"
+echo "新病例严格波次: batch_size=${batch_size}, remaining=${remaining_count}, waves=${remaining_wave_count}"
 
 for ((offset = 0, wave = 1; offset < remaining_count; offset += batch_size, wave += 1)); do
-  wave_targets=("${remaining_targets[@]:offset:batch_size}")
-  echo "开始波次 ${wave}/${wave_count}: ${#wave_targets[@]}例；本波全部产生cleanup状态后才进入下一波。"
-  PYTHONPATH="${root}/src" "${core_python}" -m snakemake \
-    --snakefile "${snakefile}" \
-    --configfile "${config}" \
-    --cores "${cores}" \
-    --keep-going \
-    --printshellcmds \
-    "${wave_targets[@]}" \
-    --resources \
-    "gpu=1" \
-    "finish_cpu=${finish_cpu_slots}" \
-    "skullstrip_cpu=${skullstrip_slots}" \
-    "t1_cpu=${t1_slots}" \
-    --config \
-    "active_config_file=${config}" \
-    "selected_participant=all" \
-    "profile=gpu" \
-    "gpu_devices=0"
-  echo "完成波次 ${wave}/${wave_count}。"
+  remaining_wave_targets=("${remaining_targets[@]:offset:batch_size}")
+  run_wave "新病例" "${wave}" "${remaining_wave_count}" "${remaining_wave_targets[@]}"
 done
 
-echo "所有固定波次均已完成，执行全队列最终聚合；已有状态不会重算。"
-exec "${root}/run_pipeline.sh" run all gpu "${cores}"
+echo "[$(date -Is)] 所有固定波次均已完成，直接聚合现有状态；不再递归启动全量DAG。"
+PYTHONPATH="${root}/src" "${core_python}" -m substain_features.cli stage aggregate \
+  --config-file "${config}" \
+  --participant-id all

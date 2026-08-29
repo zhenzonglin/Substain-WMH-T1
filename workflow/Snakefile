@@ -19,8 +19,8 @@ GPU_DEVICES = str(config.get("gpu_devices", ""))
 EXECUTION_CONFIG = config.get("execution", {})
 CPU_HEAVY_THREADS = max(1, int(EXECUTION_CONFIG.get("cpu_threads_per_job", 8)))
 
-# 完例优先：越接近cleanup的CPU阶段优先级越高；GPU WMH保持最高。
-# skullstrip_cpu限制新病例铺开速度，t1_cpu限制DLICV长期占满CPU。
+# 严格完例优先：越接近cleanup的阶段优先级越高。
+# WMH-SynthSeg仍独占GPU，但不会挤占下游CPU配额；T1在WMH特征后进入CPU队列。
 
 
 def load_rows():
@@ -104,7 +104,7 @@ rule skullstrip:
         stage_pattern("skullstrip")
     wildcard_constraints:
         participant="|".join(PARTICIPANTS)
-    priority: 20
+    priority: 10
     resources:
         gpu=0,
         skullstrip_cpu=1
@@ -121,7 +121,7 @@ rule wmh_segmentation:
         stage_pattern("wmh_seg")
     wildcard_constraints:
         participant="|".join(PARTICIPANTS)
-    priority: 130
+    priority: 145
     resources:
         gpu=1 if PROFILE == "gpu" else 0
     shell:
@@ -136,7 +136,7 @@ rule registration:
         stage_pattern("registration")
     wildcard_constraints:
         participant="|".join(PARTICIPANTS)
-    priority: 80
+    priority: 120
     resources:
         gpu=0,
         finish_cpu=1
@@ -153,7 +153,7 @@ rule lesion_processing:
         stage_pattern("lesion")
     wildcard_constraints:
         participant="|".join(PARTICIPANTS)
-    priority: 90
+    priority: 130
     resources:
         gpu=0,
         finish_cpu=1
@@ -172,7 +172,7 @@ rule wmh:
         stage_pattern("wmh")
     wildcard_constraints:
         participant="|".join(PARTICIPANTS)
-    priority: 100
+    priority: 140
     resources:
         gpu=0,
         finish_cpu=1
@@ -181,15 +181,16 @@ rule wmh:
         recorded_subject_failure_allowed("PYTHONPATH={ROOT}/src {WMH_PYTHON} -m substain_features.cli stage wmh --config-file {CONFIG_FILE} --participant-id {{wildcards.participant}} --profile {PROFILE}".format(ROOT=ROOT, WMH_PYTHON=WMH_PYTHON, CONFIG_FILE=CONFIG_FILE, PROFILE=PROFILE))
 
 
-# 06 CPU队列：T1 145/119/20维与技术常模，与GPU排队完全独立。
+# 06 CPU队列：T1 145/119/20维与技术常模。
+# ancient仅建立调度门：新T1等待该例WMH特征，已有T1不因时间戳重算。
 rule t1:
     input:
-        rules.audit.output
+        wmh=ancient(stage_pattern("wmh"))
     output:
         stage_pattern("t1")
     wildcard_constraints:
         participant="|".join(PARTICIPANTS)
-    priority: 10
+    priority: 150
     resources:
         gpu=0,
         t1_cpu=1
@@ -209,7 +210,7 @@ rule qc:
         stage_pattern("qc")
     wildcard_constraints:
         participant="|".join(PARTICIPANTS)
-    priority: 110
+    priority: 160
     shell:
         recorded_subject_failure_allowed("PYTHONPATH={ROOT}/src {CORE} -m substain_features.cli stage qc --config-file {CONFIG_FILE} --participant-id {{wildcards.participant}}".format(ROOT=ROOT, CORE=CORE, CONFIG_FILE=CONFIG_FILE))
 
@@ -222,7 +223,7 @@ rule cleanup:
         stage_pattern("cleanup")
     wildcard_constraints:
         participant="|".join(PARTICIPANTS)
-    priority: 120
+    priority: 170
     shell:
         recorded_subject_failure_allowed("PYTHONPATH={ROOT}/src {CORE} -m substain_features.cli stage cleanup --config-file {CONFIG_FILE} --participant-id {{wildcards.participant}}".format(ROOT=ROOT, CORE=CORE, CONFIG_FILE=CONFIG_FILE))
 
