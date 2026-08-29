@@ -43,6 +43,7 @@ def test_snakemake_target_precedes_config_values(project_root: Path, monkeypatch
     assert command.index("lowres_validation") < command.index("--config")
     assert command.index("--dry-run") < command.index("--config")
     assert "active_config_file={}".format((project_root / "config" / "config.yaml").resolve()) in command
+    assert "t1_cpu=2" in command
 
 
 def test_guarded_stage_failure_returns_nonzero(tmp_path: Path, monkeypatch) -> None:

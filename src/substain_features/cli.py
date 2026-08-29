@@ -120,9 +120,10 @@ def run_command(
         1,
         int(config.get("execution", {}).get("cpu_threads_per_job", 8)),
     )
-    # 为两个上游SynthStrip保留CPU空间；其余重型CPU槽优先用于完成
-    # registration -> lesion -> WMH特征，避免DLICV/SynthStrip铺满全部核心。
+    # 为两个上游SynthStrip保留CPU空间；T1最多同时两例；其余重型CPU槽
+    # 优先用于registration -> lesion -> WMH特征，避免DLICV铺满全部核心。
     skullstrip_slots = 2 if cores >= 3 * cpu_threads_per_job else 1
+    t1_slots = 2 if cores >= 2 * cpu_threads_per_job else 1
     reserved_upstream_threads = skullstrip_slots * cpu_threads_per_job
     finish_cpu_slots = max(
         1,
@@ -164,6 +165,7 @@ def run_command(
             "gpu={}".format(len(gpu_ids) if selected_profile == "gpu" else 0),
             "finish_cpu={}".format(finish_cpu_slots),
             "skullstrip_cpu={}".format(skullstrip_slots),
+            "t1_cpu={}".format(t1_slots),
             "--config",
             "active_config_file={}".format(config_file),
             "selected_participant={}".format(participant_id),
