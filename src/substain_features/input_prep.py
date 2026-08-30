@@ -43,6 +43,14 @@ BIDS_SELECTION_COLUMNS = [
     "minimum_fov_mm",
     "run_number",
 ]
+EXCLUSION_COLUMNS = [
+    "participant_id",
+    "in_metadata",
+    "has_t1",
+    "has_flair",
+    "has_lesion",
+    "exclusion_reason",
+]
 
 
 @dataclass(frozen=True)
@@ -297,18 +305,47 @@ def _scan_bids(root: Path) -> Tuple[Dict[str, Path], Dict[str, Path], List[Dict[
     return t1, flair, selection_rows
 
 
-def _require_same_ids(collections: Mapping[str, Mapping[str, Path]], metadata_ids: Iterable[str]) -> List[str]:
-    expected = set(metadata_ids)
-    messages: List[str] = []
-    for name, values in collections.items():
-        observed = set(values)
-        missing = sorted(expected - observed)
-        extra = sorted(observed - expected)
-        if missing or extra:
-            messages.append("{} missing={} extra={}".format(name, missing, extra))
-    if messages:
-        raise ValueError("输入ID无法严格一一匹配；" + "；".join(messages))
-    return sorted(expected)
+def _select_complete_cases(
+    collections: Mapping[str, Mapping[str, Path]],
+    metadata_ids: Iterable[str],
+) -> Tuple[List[str], List[Dict[str, object]]]:
+    """仅纳入元数据、T1、FLAIR和病灶均存在的病例，并记录排除原因。"""
+
+    metadata_set = set(metadata_ids)
+    observed = {name: set(values) for name, values in collections.items()}
+    included = set(metadata_set)
+    for values in observed.values():
+        included.intersection_update(values)
+    universe = set(metadata_set)
+    for values in observed.values():
+        universe.update(values)
+
+    exclusions: List[Dict[str, object]] = []
+    for participant_id in sorted(universe - included):
+        reasons: List[str] = []
+        if participant_id not in metadata_set:
+            reasons.append("missing_metadata")
+        if participant_id not in observed["T1"]:
+            reasons.append("missing_t1")
+        if participant_id not in observed["FLAIR"]:
+            reasons.append("missing_flair")
+        if participant_id not in observed["lesion"]:
+            reasons.append("missing_lesion")
+        exclusions.append(
+            {
+                "participant_id": participant_id,
+                "in_metadata": participant_id in metadata_set,
+                "has_t1": participant_id in observed["T1"],
+                "has_flair": participant_id in observed["FLAIR"],
+                "has_lesion": participant_id in observed["lesion"],
+                "exclusion_reason": ";".join(reasons),
+            }
+        )
+    if not included:
+        counts = {"metadata": len(metadata_set)}
+        counts.update({name: len(values) for name, values in observed.items()})
+        raise ValueError("完整输入交集为空: {}".format(counts))
+    return sorted(included), exclusions
 
 
 def _replace_symlink(link: Path, target: Path) -> None:
@@ -365,11 +402,16 @@ def prepare_inputs(config: Mapping[str, object]) -> Dict[str, object]:
     else:
         raise ValueError("input.mode 只允许 bids/folders，收到 {!r}".format(mode))
 
-    participant_ids = _require_same_ids({"T1": t1, "FLAIR": flair, "lesion": lesion}, metadata)
+    participant_ids, exclusion_rows = _select_complete_cases(
+        {"T1": t1, "FLAIR": flair, "lesion": lesion}, metadata
+    )
+    included_set = set(participant_ids)
+    selection_rows = [row for row in selection_rows if row["participant_id"] in included_set]
     view_root = _absolute(project_root, input_config.get("bids_links", "inputs/bids_links"))
     participants_path = _absolute(project_root, config["participants"])
     manifest_path = view_root / "input_manifest.tsv"
     selection_manifest_path = view_root / "bids_selection.tsv"
+    exclusion_manifest_path = view_root / "input_exclusions.tsv"
     participant_rows: List[Dict[str, object]] = []
     manifest_rows: List[Dict[str, object]] = []
     for participant_id in participant_ids:
@@ -418,18 +460,32 @@ def prepare_inputs(config: Mapping[str, object]) -> Dict[str, object]:
         pd.DataFrame(selection_rows, columns=BIDS_SELECTION_COLUMNS),
         selection_manifest_path,
     )
+    exclusion_manifest_changed = _write_tsv_if_changed(
+        pd.DataFrame(exclusion_rows, columns=EXCLUSION_COLUMNS),
+        exclusion_manifest_path,
+    )
     return {
         "status": "pass",
         "mode": mode,
         "participant_count": len(participant_ids),
-        "participants": participant_ids,
+        "participant_sample": participant_ids[:20],
+        "participant_sample_truncated": len(participant_ids) > 20,
         "participants_tsv": str(participants_path),
         "bids_links": str(view_root),
         "input_manifest": str(manifest_path),
         "bids_selection": str(selection_manifest_path),
+        "input_exclusions": str(exclusion_manifest_path),
+        "excluded_count": len(exclusion_rows),
+        "source_counts": {
+            "metadata": len(metadata),
+            "T1": len(t1),
+            "FLAIR": len(flair),
+            "lesion": len(lesion),
+        },
         "participants_tsv_changed": participants_changed,
         "input_manifest_changed": manifest_changed,
         "bids_selection_changed": selection_manifest_changed,
+        "input_exclusions_changed": exclusion_manifest_changed,
         "raw_inputs_modified": False,
         "session_entities_removed_from_links": True,
     }
