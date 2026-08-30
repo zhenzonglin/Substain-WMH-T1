@@ -33,6 +33,12 @@ for gpu_id in "${gpu_id_list[@]}"; do
   seen_gpu_ids[${gpu_id}]=1
 done
 gpu_count=${#gpu_id_list[@]}
+if (( gpu_count != 2 )); then
+  echo "GB双GPU调度要求CUDA_VISIBLE_DEVICES恰好包含两张卡，顺序为WMH,SynthStrip；收到: ${gpu_devices}" >&2
+  exit 2
+fi
+wmh_gpu_id="${gpu_id_list[0]}"
+synthstrip_gpu_id="${gpu_id_list[1]}"
 
 config="${root}/config/config.yaml"
 core_python="${root}/envs/core-venv/bin/python"
@@ -48,7 +54,7 @@ mkdir -p "${root}/logs"
 cd "${root}"
 
 # CPU重任务不再划分固定阶段槽；Snakemake依据总核心数、每例线程数和优先级
-# 动态填充空闲核心。GPU仍由唯一资源令牌和进程锁串行化。
+# 动态填充空闲核心。WMH与SynthStrip分别固定占用一张GPU并各自串行化。
 
 export CUDA_VISIBLE_DEVICES="${gpu_devices}"
 export OMP_NUM_THREADS="${OMP_NUM_THREADS:-${cpu_threads}}"
@@ -145,7 +151,7 @@ else
   backlog_wave_count=0
 fi
 
-echo "GB严格调度资源: cores=${cores}, heavy_threads=${cpu_threads}, cpu_custom_caps=none, gpu=${gpu_count}, gpu_devices=${gpu_devices}"
+echo "GB严格调度资源: cores=${cores}, heavy_threads=${cpu_threads}, gpu_stage_threads=1, cpu_custom_caps=none, gpu=${gpu_count}, gpu_roles=wmh:${wmh_gpu_id},synthstrip:${synthstrip_gpu_id}"
 echo "积压严格波次: batch_size=${batch_size}, backlog=${backlog_count}, waves=${backlog_wave_count}"
 
 print_wave_plan() {
@@ -186,6 +192,8 @@ run_wave() {
     "${wave_targets[@]}" \
     --resources \
     "gpu=${gpu_count}" \
+    "wmh_gpu=1" \
+    "synthstrip_gpu=1" \
     --config \
     "active_config_file=${config}" \
     "selected_participant=all" \
