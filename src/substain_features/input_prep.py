@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import re
 from dataclasses import dataclass
@@ -9,6 +10,8 @@ from io import StringIO
 from pathlib import Path
 from typing import Dict, Iterable, List, Mapping, Tuple
 
+import nibabel as nib
+import numpy as np
 import pandas as pd
 
 from .resources import sha256
@@ -21,6 +24,25 @@ _BIDS_IMAGE = re.compile(
     r"(?:_[A-Za-z0-9]+-[A-Za-z0-9]+)*_(?P<suffix>T1w|FLAIR)\.nii(?:\.gz)?$"
 )
 _BIDS_LABEL = re.compile(r"^[A-Za-z0-9]+$")
+_RUN_ENTITY = re.compile(r"(?:^|_)run-(?P<run>[0-9]+)(?:_|$)", re.IGNORECASE)
+_PLANE_NAMES = {0: "sagittal", 1: "coronal", 2: "axial"}
+_PLANE_PRIORITY = {"axial": 0, "sagittal": 1, "coronal": 2, "oblique": 3, "unknown": 4}
+BIDS_SELECTION_COLUMNS = [
+    "participant_id",
+    "modality",
+    "selected",
+    "rank",
+    "path",
+    "plane",
+    "orientation_confidence",
+    "orientation_source",
+    "isotropic_3d",
+    "shape",
+    "zooms_mm",
+    "voxel_volume_mm3",
+    "minimum_fov_mm",
+    "run_number",
+]
 
 
 @dataclass(frozen=True)
@@ -31,6 +53,23 @@ class InputCase:
     t1w: Path
     flair: Path
     lesion: Path
+
+
+@dataclass(frozen=True)
+class BidsCandidate:
+    """只依据头信息得到的BIDS候选几何质量。"""
+
+    path: Path
+    plane: str
+    orientation_confidence: float
+    orientation_source: str
+    isotropic_3d: bool
+    shape: Tuple[int, int, int]
+    zooms: Tuple[float, float, float]
+    voxel_volume: float
+    minimum_fov: float
+    voxel_count: int
+    run_number: int
 
 
 def _absolute(root: Path, value: object) -> Path:
@@ -103,8 +142,129 @@ def _scan_suffix(root: Path, suffix: str, modality: str) -> Dict[str, Path]:
     return matches
 
 
-def _scan_bids(root: Path) -> Tuple[Dict[str, Path], Dict[str, Path]]:
-    """解析最小BIDS实体并拒绝多session或同模态多文件。"""
+def _json_sidecar(nifti: Path) -> Path:
+    text = str(nifti)
+    return Path(text[:-7] + ".json") if text.lower().endswith(".nii.gz") else nifti.with_suffix(".json")
+
+
+def _plane_from_normal(normal: np.ndarray) -> Tuple[str, float]:
+    norm = float(np.linalg.norm(normal))
+    if not np.isfinite(norm) or norm == 0:
+        return "unknown", 0.0
+    direction = np.abs(normal / norm)
+    dominant_axis = int(np.argmax(direction))
+    confidence = float(direction[dominant_axis])
+    return (_PLANE_NAMES[dominant_axis] if confidence >= 0.8 else "oblique", confidence)
+
+
+def _candidate_geometry(path: Path) -> BidsCandidate:
+    """优先用DICOM方向；缺失时由NIfTI仿射和层厚估计采集平面。"""
+
+    try:
+        image = nib.load(str(path))
+    except Exception as exc:
+        raise ValueError("无法读取BIDS候选NIfTI头信息: {} ({})".format(path, exc)) from exc
+    if len(image.shape) < 3:
+        raise ValueError("BIDS候选不是三维影像: {} shape={}".format(path, image.shape))
+    shape = tuple(int(value) for value in image.shape[:3])
+    zooms_array = np.asarray(image.header.get_zooms()[:3], dtype=float)
+    if zooms_array.size != 3 or not np.all(np.isfinite(zooms_array)) or np.any(zooms_array <= 0):
+        raise ValueError("BIDS候选体素尺寸非法: {} zooms={}".format(path, zooms_array.tolist()))
+    zooms = tuple(float(value) for value in zooms_array)
+    voxel_volume = float(np.prod(zooms_array))
+    fov = np.asarray(shape, dtype=float) * zooms_array
+    anisotropy = float(np.max(zooms_array) / np.min(zooms_array))
+    isotropic_3d = bool(np.max(zooms_array) <= 2.0 and anisotropy <= 1.5 and min(shape) >= 32)
+
+    metadata = {}
+    sidecar = _json_sidecar(path)
+    if sidecar.is_file():
+        try:
+            metadata = json.loads(sidecar.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise ValueError("BIDS JSON无法读取: {} ({})".format(sidecar, exc)) from exc
+
+    iop = metadata.get("ImageOrientationPatientDICOM")
+    if isinstance(iop, list) and len(iop) == 6:
+        try:
+            row = np.asarray(iop[:3], dtype=float)
+            column = np.asarray(iop[3:], dtype=float)
+            plane, confidence = _plane_from_normal(np.cross(row, column))
+            orientation_source = "json_iop"
+        except (TypeError, ValueError):
+            plane, confidence = "unknown", 0.0
+            orientation_source = "invalid_json_iop"
+    elif isotropic_3d:
+        plane, confidence = "unknown", 0.0
+        orientation_source = "isotropic_header"
+    else:
+        slice_axis = int(np.argmax(zooms_array))
+        plane, confidence = _plane_from_normal(np.asarray(image.affine[:3, slice_axis], dtype=float))
+        orientation_source = "nifti_affine"
+
+    run_match = _RUN_ENTITY.search(path.name)
+    run_number = int(run_match.group("run")) if run_match else 0
+    return BidsCandidate(
+        path=path.resolve(),
+        plane=plane,
+        orientation_confidence=confidence,
+        orientation_source=orientation_source,
+        isotropic_3d=isotropic_3d,
+        shape=shape,
+        zooms=zooms,
+        voxel_volume=voxel_volume,
+        minimum_fov=float(np.min(fov)),
+        voxel_count=int(np.prod(np.asarray(shape, dtype=np.int64))),
+        run_number=run_number,
+    )
+
+
+def _candidate_quality(candidate: BidsCandidate) -> Tuple[object, ...]:
+    """3D近等体素优先；其余优先轴位，再比较分辨率、覆盖和run号。"""
+
+    return (
+        0 if candidate.isotropic_3d else 1,
+        0 if candidate.isotropic_3d else _PLANE_PRIORITY.get(candidate.plane, 4),
+        round(candidate.voxel_volume, 8),
+        -round(candidate.minimum_fov, 4),
+        -candidate.voxel_count,
+        candidate.run_number,
+        str(candidate.path),
+    )
+
+
+def _choose_bids_candidate(
+    participant_id: str,
+    modality: str,
+    paths: List[Path],
+) -> Tuple[Path, List[Dict[str, object]]]:
+    candidates = sorted((_candidate_geometry(path) for path in paths), key=_candidate_quality)
+    selected = candidates[0]
+    records: List[Dict[str, object]] = []
+    for rank, candidate in enumerate(candidates, start=1):
+        records.append(
+            {
+                "participant_id": participant_id,
+                "modality": modality,
+                "selected": candidate.path == selected.path,
+                "rank": rank,
+                "path": str(candidate.path),
+                "plane": candidate.plane,
+                "orientation_confidence": round(candidate.orientation_confidence, 6),
+                "orientation_source": candidate.orientation_source,
+                "isotropic_3d": candidate.isotropic_3d,
+                "shape": "x".join(str(value) for value in candidate.shape),
+                "zooms_mm": "x".join("{:g}".format(value) for value in candidate.zooms),
+                "voxel_volume_mm3": round(candidate.voxel_volume, 6),
+                "minimum_fov_mm": round(candidate.minimum_fov, 4),
+                "run_number": candidate.run_number,
+            }
+        )
+    return selected.path, records
+
+
+def _scan_bids(root: Path) -> Tuple[Dict[str, Path], Dict[str, Path], List[Dict[str, object]]]:
+    """解析BIDS并对同session、同模态的多run进行可追溯几何择优。"""
 
     if not root.is_dir():
         raise FileNotFoundError("BIDS根目录不存在: {}".format(root))
@@ -119,17 +279,22 @@ def _scan_bids(root: Path) -> Tuple[Dict[str, Path], Dict[str, Path]]:
         )
     t1: Dict[str, Path] = {}
     flair: Dict[str, Path] = {}
+    selection_rows: List[Dict[str, object]] = []
     for participant_id, modalities in grouped.items():
         all_sessions = {session for values in modalities.values() for session, _ in values}
         if len(all_sessions) > 1:
             raise ValueError("{} 含多个BIDS session，不能展平: {}".format(participant_id, sorted(all_sessions)))
         for suffix, destination in (("T1w", t1), ("FLAIR", flair)):
             values = modalities.get(suffix, [])
-            if len(values) > 1:
-                raise ValueError("{} 的{}文件不唯一: {}".format(participant_id, suffix, [str(row[1]) for row in values]))
             if values:
-                destination[participant_id] = values[0][1]
-    return t1, flair
+                selected, records = _choose_bids_candidate(
+                    participant_id,
+                    suffix,
+                    [row[1] for row in values],
+                )
+                destination[participant_id] = selected
+                selection_rows.extend(records)
+    return t1, flair, selection_rows
 
 
 def _require_same_ids(collections: Mapping[str, Mapping[str, Path]], metadata_ids: Iterable[str]) -> List[str]:
@@ -189,8 +354,9 @@ def prepare_inputs(config: Mapping[str, object]) -> Dict[str, object]:
         str(input_config["lesion_suffix"]),
         "lesion",
     )
+    selection_rows: List[Dict[str, object]] = []
     if mode == "bids":
-        t1, flair = _scan_bids(_absolute(project_root, input_config["bids_root"]))
+        t1, flair, selection_rows = _scan_bids(_absolute(project_root, input_config["bids_root"]))
     elif mode == "folders":
         t1 = _scan_suffix(_absolute(project_root, input_config["t1_root"]), str(input_config["t1_suffix"]), "T1")
         flair = _scan_suffix(
@@ -203,6 +369,7 @@ def prepare_inputs(config: Mapping[str, object]) -> Dict[str, object]:
     view_root = _absolute(project_root, input_config.get("bids_links", "inputs/bids_links"))
     participants_path = _absolute(project_root, config["participants"])
     manifest_path = view_root / "input_manifest.tsv"
+    selection_manifest_path = view_root / "bids_selection.tsv"
     participant_rows: List[Dict[str, object]] = []
     manifest_rows: List[Dict[str, object]] = []
     for participant_id in participant_ids:
@@ -247,6 +414,10 @@ def prepare_inputs(config: Mapping[str, object]) -> Dict[str, object]:
         pd.DataFrame(participant_rows, columns=PARTICIPANT_COLUMNS), participants_path
     )
     manifest_changed = _write_tsv_if_changed(pd.DataFrame(manifest_rows), manifest_path)
+    selection_manifest_changed = _write_tsv_if_changed(
+        pd.DataFrame(selection_rows, columns=BIDS_SELECTION_COLUMNS),
+        selection_manifest_path,
+    )
     return {
         "status": "pass",
         "mode": mode,
@@ -255,8 +426,10 @@ def prepare_inputs(config: Mapping[str, object]) -> Dict[str, object]:
         "participants_tsv": str(participants_path),
         "bids_links": str(view_root),
         "input_manifest": str(manifest_path),
+        "bids_selection": str(selection_manifest_path),
         "participants_tsv_changed": participants_changed,
         "input_manifest_changed": manifest_changed,
+        "bids_selection_changed": selection_manifest_changed,
         "raw_inputs_modified": False,
         "session_entities_removed_from_links": True,
     }
