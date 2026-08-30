@@ -220,7 +220,7 @@ def _candidate_geometry(path: Path) -> BidsCandidate:
 
 
 def _candidate_quality(candidate: BidsCandidate) -> Tuple[object, ...]:
-    """3D近等体素优先；其余优先轴位，再比较分辨率、覆盖和run号。"""
+    """3D近等体素优先；其余优先轴位；几何同分时默认run-2。"""
 
     return (
         0 if candidate.isotropic_3d else 1,
@@ -228,6 +228,7 @@ def _candidate_quality(candidate: BidsCandidate) -> Tuple[object, ...]:
         round(candidate.voxel_volume, 8),
         -round(candidate.minimum_fov, 4),
         -candidate.voxel_count,
+        0 if candidate.run_number == 2 else 1,
         candidate.run_number,
         str(candidate.path),
     )
