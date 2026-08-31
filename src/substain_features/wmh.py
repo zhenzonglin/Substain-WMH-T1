@@ -4,15 +4,18 @@ import os
 import subprocess
 import sys
 from pathlib import Path
-from typing import Dict, List, Mapping, Optional, Sequence, Tuple
+from typing import Dict, Mapping, Optional, Tuple
 
 import nibabel as nib
 import numpy as np
 from scipy.io import loadmat
 
+from .images import physical_grid_diagnostics
+
 
 WMH_REGIONS = ["basal_ganglia", "frontal", "occipital", "temporal", "parietal"]
 WMH_FEATURES = ["wmh_{}_layer{}_ml".format(region, layer) for region in WMH_REGIONS for layer in range(1, 5)]
+WMH_ATLAS_MAX_CORNER_DISPLACEMENT_MM = 0.05
 
 
 def run_wmh_synthseg(
@@ -63,13 +66,31 @@ def run_wmh_synthseg(
     return output_seg
 
 
-def extract_wmh20_ml(corrected_wmh: Path, native_atlas: Path) -> Dict[str, float]:
+def extract_wmh20_ml(
+    corrected_wmh: Path,
+    native_atlas: Path,
+    grid_details: Optional[Dict[str, object]] = None,
+) -> Dict[str, float]:
     """在原生 FLAIR 体素中计算 mL，不对 FLAIR 上采样后计数。"""
 
     wmh_image = nib.load(str(corrected_wmh))
     atlas_image = nib.load(str(native_atlas))
-    if wmh_image.shape[:3] != atlas_image.shape[:3] or not np.allclose(wmh_image.affine, atlas_image.affine):
-        raise ValueError("WMH 与 20区图谱网格不一致")
+    comparison = physical_grid_diagnostics(
+        wmh_image,
+        atlas_image,
+        max_corner_displacement_mm=WMH_ATLAS_MAX_CORNER_DISPLACEMENT_MM,
+    )
+    if grid_details is not None:
+        grid_details.update(comparison)
+    if not comparison["matches"]:
+        raise ValueError(
+            "WMH 与 20区图谱网格不一致: "
+            "wmh_shape={shape_first}, atlas_shape={shape_second}, "
+            "affines_finite={affines_finite}, max_affine_abs_diff={max_affine_abs_diff}, "
+            "max_corner_displacement_mm={max_corner_displacement_mm}, threshold_mm={threshold_mm}".format(
+                **comparison
+            )
+        )
     wmh = wmh_image.get_fdata() > 0
     atlas = np.rint(atlas_image.get_fdata()).astype(np.int16)
     labels = sorted(int(value) for value in np.unique(atlas) if value > 0)

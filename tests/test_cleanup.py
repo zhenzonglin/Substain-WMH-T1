@@ -34,6 +34,7 @@ def test_success_cleanup_keeps_final_outputs_and_removes_rebuildable_files(tmp_p
         "donor": make("wmh/contralateral/donor.nii.gz"),
     }
     make("t1/nichart_tool_output/temp_working_dir/scratch.nii.gz")
+    write_status(status_path(config, participant, "skullstrip"), "skullstrip", "pass", "A01", {})
     write_status(status_path(config, participant, "registration"), "registration", "pass", "A01", {})
     write_status(
         status_path(config, participant, "lesion"), "lesion", "pass", "A01",
@@ -57,3 +58,28 @@ def test_success_cleanup_keeps_final_outputs_and_removes_rebuildable_files(tmp_p
     assert all(not Path(path).exists() for path in removable.values())
     assert not (subject / "t1/nichart_tool_output/temp_working_dir").exists()
     assert details["bytes_removed"] > 0
+
+
+def test_failed_cleanup_keeps_only_status_and_logs(tmp_path: Path) -> None:
+    config = {"project_root": str(tmp_path), "derivatives": "derivatives"}
+    participant = Participant("A02", 61.0, "male", "SITE", tmp_path / "t1", tmp_path / "flair", tmp_path / "lesion")
+    subject = tmp_path / "derivatives" / "sub-A02"
+    (subject / "wmh").mkdir(parents=True)
+    (subject / "wmh" / "intermediate.nii.gz").write_bytes(b"image")
+    (subject / "logs").mkdir()
+    (subject / "logs" / "wmh.log").write_text("failure", encoding="utf-8")
+    write_status(
+        status_path(config, participant, "wmh"),
+        "wmh",
+        "fail",
+        "A02",
+        {"error": "WMH 与 20区图谱网格不一致"},
+    )
+
+    details = stage_cleanup(config, participant)
+
+    assert details["policy"] == "error_records_only_v1"
+    assert details["failed_case_intermediates_retained"] is False
+    assert sorted(path.name for path in subject.iterdir()) == ["logs", "status"]
+    assert (subject / "logs" / "wmh.log").is_file()
+    assert (subject / "status" / "wmh.json").is_file()

@@ -33,6 +33,43 @@ def test_wmh_order_and_ml_are_native_voxel_based(tmp_path: Path) -> None:
     assert all(np.isclose(value, 0.005) for value in features.values())
 
 
+def test_wmh_volume_is_unchanged_for_subthreshold_header_rounding(tmp_path: Path) -> None:
+    affine = np.diag([0.4688, 0.4688, 7.0, 1.0])
+    rounded_affine = affine.copy()
+    rounded_affine[0, 3] += 0.049
+    atlas = np.arange(1, 21, dtype=np.int16).reshape((20, 1, 1))
+    wmh = np.ones_like(atlas, dtype=np.uint8)
+    exact_atlas = tmp_path / "atlas_exact.nii.gz"
+    rounded_atlas = tmp_path / "atlas_rounded.nii.gz"
+    wmh_path = tmp_path / "wmh.nii.gz"
+    nib.save(nib.Nifti1Image(atlas, affine), exact_atlas)
+    nib.save(nib.Nifti1Image(atlas, rounded_affine), rounded_atlas)
+    nib.save(nib.Nifti1Image(wmh, affine), wmh_path)
+
+    exact = extract_wmh20_ml(wmh_path, exact_atlas)
+    diagnostics = {}
+    tolerated = extract_wmh20_ml(wmh_path, rounded_atlas, grid_details=diagnostics)
+
+    assert tolerated == exact
+    assert diagnostics["matches"] is True
+    assert diagnostics["max_corner_displacement_mm"] < 0.05
+
+
+def test_wmh_grid_error_reports_physical_diagnostics(tmp_path: Path) -> None:
+    affine = np.eye(4)
+    shifted = affine.copy()
+    shifted[0, 3] = 0.051
+    atlas = np.arange(1, 21, dtype=np.int16).reshape((20, 1, 1))
+    wmh = np.ones_like(atlas, dtype=np.uint8)
+    atlas_path = tmp_path / "atlas.nii.gz"
+    wmh_path = tmp_path / "wmh.nii.gz"
+    nib.save(nib.Nifti1Image(atlas, shifted), atlas_path)
+    nib.save(nib.Nifti1Image(wmh, affine), wmh_path)
+
+    with np.testing.assert_raises_regex(ValueError, "max_corner_displacement_mm"):
+        extract_wmh20_ml(wmh_path, atlas_path)
+
+
 def test_wmh_subprocess_inherits_current_interpreter(tmp_path: Path, monkeypatch) -> None:
     """防止 core/WMH 隔离环境因 PATH 顺序串用 Python。"""
 

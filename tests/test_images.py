@@ -6,10 +6,41 @@ import numpy as np
 from substain_features.images import (
     _max_overlay_center,
     _orthogonal_qc_views,
+    physical_grid_diagnostics,
     resample_continuous_to_reference,
     resample_label_to_reference,
     same_grid,
 )
+
+
+class _ImageLike:
+    def __init__(self, shape, affine):
+        self.shape = shape
+        self.affine = affine
+
+
+def test_physical_grid_corner_tolerance_boundaries() -> None:
+    reference = _ImageLike((512, 512, 20), np.eye(4))
+    for displacement, expected in ((0.0026, True), (0.049, True), (0.051, False), (0.5, False)):
+        shifted = np.eye(4)
+        shifted[0, 3] = displacement
+        details = physical_grid_diagnostics(reference, _ImageLike(reference.shape, shifted), 0.05)
+        assert details["matches"] is expected
+        assert np.isclose(details["max_corner_displacement_mm"], displacement)
+
+
+def test_physical_grid_rejects_shape_change_and_nonfinite_affine() -> None:
+    reference = _ImageLike((10, 11, 12), np.eye(4))
+    shape_mismatch = physical_grid_diagnostics(reference, _ImageLike((10, 11, 13), np.eye(4)), 0.05)
+    assert shape_mismatch["shape_equal"] is False
+    assert shape_mismatch["matches"] is False
+
+    invalid = np.eye(4)
+    invalid[0, 0] = np.nan
+    nonfinite = physical_grid_diagnostics(reference, _ImageLike(reference.shape, invalid), 0.05)
+    assert nonfinite["affines_finite"] is False
+    assert nonfinite["max_corner_displacement_mm"] is None
+    assert nonfinite["matches"] is False
 
 
 def test_lesion_resampling_uses_world_coordinates(tmp_path: Path) -> None:

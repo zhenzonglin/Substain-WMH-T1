@@ -34,6 +34,70 @@ def same_grid(first: Path, second: Path, atol: float = 1e-4) -> bool:
     return a.shape[:3] == b.shape[:3] and bool(np.allclose(a.affine, b.affine, atol=atol))
 
 
+def physical_grid_diagnostics(
+    first: nib.spatialimages.SpatialImage,
+    second: nib.spatialimages.SpatialImage,
+    max_corner_displacement_mm: float,
+) -> Dict[str, object]:
+    """用对应体素角点的世界坐标位移判断两个三维网格是否等价。
+
+    形状必须完全一致，仿射必须全部为有限值。仿射系数差只用于诊断，
+    真正的空间容差由八个角点的最大三维欧氏距离决定。
+    """
+
+    if not np.isfinite(max_corner_displacement_mm) or max_corner_displacement_mm < 0:
+        raise ValueError("max_corner_displacement_mm必须是有限非负数")
+    first_shape = tuple(int(value) for value in first.shape[:3])
+    second_shape = tuple(int(value) for value in second.shape[:3])
+    first_affine = np.asarray(first.affine, dtype=float)
+    second_affine = np.asarray(second.affine, dtype=float)
+    affines_finite = bool(np.isfinite(first_affine).all() and np.isfinite(second_affine).all())
+    max_affine_abs_diff = None
+    max_displacement = None
+    if affines_finite:
+        max_affine_abs_diff = float(np.max(np.abs(first_affine - second_affine)))
+        first_extent = np.asarray(first_shape, dtype=float) - 1.0
+        second_extent = np.asarray(second_shape, dtype=float) - 1.0
+        first_corners = np.asarray(
+            [
+                [i, j, k, 1.0]
+                for i in (0.0, first_extent[0])
+                for j in (0.0, first_extent[1])
+                for k in (0.0, first_extent[2])
+            ],
+            dtype=float,
+        )
+        second_corners = np.asarray(
+            [
+                [i, j, k, 1.0]
+                for i in (0.0, second_extent[0])
+                for j in (0.0, second_extent[1])
+                for k in (0.0, second_extent[2])
+            ],
+            dtype=float,
+        )
+        first_world = (first_affine @ first_corners.T).T[:, :3]
+        second_world = (second_affine @ second_corners.T).T[:, :3]
+        max_displacement = float(np.linalg.norm(first_world - second_world, axis=1).max())
+    shape_equal = first_shape == second_shape
+    matches = bool(
+        shape_equal
+        and affines_finite
+        and max_displacement is not None
+        and max_displacement <= max_corner_displacement_mm
+    )
+    return {
+        "shape_first": list(first_shape),
+        "shape_second": list(second_shape),
+        "shape_equal": shape_equal,
+        "affines_finite": affines_finite,
+        "max_affine_abs_diff": max_affine_abs_diff,
+        "max_corner_displacement_mm": max_displacement,
+        "threshold_mm": float(max_corner_displacement_mm),
+        "matches": matches,
+    }
+
+
 def world_bounds(path: Path) -> np.ndarray:
     """计算 NIfTI 8 个角点的轴对齐世界坐标包围盒。"""
 

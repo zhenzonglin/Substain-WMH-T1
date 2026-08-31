@@ -167,8 +167,8 @@ def stage_lesion(config: Mapping[str, object], participant: Participant) -> Dict
     }
 
 
-def stage_registration(config: Mapping[str, object], participant: Participant, profile: str) -> Dict[str, object]:
-    """使用固定SynthStrip处理T1/FLAIR，随后始终估计T1→FLAIR刚体变换。"""
+def stage_skullstrip(config: Mapping[str, object], participant: Participant, profile: str) -> Dict[str, object]:
+    """仅执行T1/FLAIR SynthStrip；ANTs配准由后续CPU阶段运行。"""
 
     root = Path(str(config["project_root"]))
     output = participant_dir(config, participant) / "registration"
@@ -238,11 +238,48 @@ def stage_registration(config: Mapping[str, object], participant: Participant, p
             participant_dir(config, participant) / "logs" / "flair_synthstrip.log",
         )
         _write_json(flair_synthstrip_provenance, flair_expected)
+    return {
+        "registration_input_t1": str(skullstripped_t1),
+        "registration_input_flair": str(skullstripped_flair),
+        "t1_brain_mask": str(brain_mask),
+        "flair_brain_mask": str(flair_mask),
+        "skullstrip_method": "FreeSurfer_SynthStrip_v7.4.1_model_v1",
+        "flair_skullstrip_method": "FreeSurfer_SynthStrip_v7.4.1_model_v1",
+        "synthstrip_reused": synthstrip_reused,
+        "flair_synthstrip_reused": flair_synthstrip_reused,
+        "synthstrip_provenance": str(synthstrip_provenance),
+        "flair_synthstrip_provenance": str(flair_synthstrip_provenance),
+        "synthstrip_source_commit": str(synthstrip["source_commit"]),  # type: ignore[index]
+        "synthstrip_model_sha256": str(synthstrip["model_sha256"]),  # type: ignore[index]
+        "synthstrip_border_mm": float(synthstrip["border_mm"]),  # type: ignore[index]
+        "requested_profile": profile,
+        "effective_device": device,
+    }
+
+
+def stage_registration(config: Mapping[str, object], participant: Participant) -> Dict[str, object]:
+    """消费已完成的SynthStrip结果，仅在CPU资源池运行ANTs配准。"""
+
+    root = Path(str(config["project_root"]))
+    output = participant_dir(config, participant) / "registration"
+    skullstrip_status = _read_json(status_path(config, participant, "skullstrip"))
+    if skullstrip_status.get("status") != "pass":
+        raise RuntimeError("依赖节点skullstrip失败，禁止运行ANTs配准")
+    skullstrip_details = dict(skullstrip_status.get("details", {}))
+    required = (
+        "registration_input_t1",
+        "registration_input_flair",
+        "t1_brain_mask",
+        "flair_brain_mask",
+    )
+    missing = [key for key in required if not skullstrip_details.get(key)]
+    if missing:
+        raise RuntimeError("skullstrip状态缺少输出字段: {}".format(",".join(missing)))
     details = register_and_warp_atlas(
-        skullstripped_t1,
-        brain_mask,
-        skullstripped_flair,
-        flair_mask,
+        Path(str(skullstrip_details["registration_input_t1"])),
+        Path(str(skullstrip_details["t1_brain_mask"])),
+        Path(str(skullstrip_details["registration_input_flair"])),
+        Path(str(skullstrip_details["flair_brain_mask"])),
         participant.flair,
         _absolute(root, config["wmh"]["template"]),  # type: ignore[index]
         _absolute(root, config["wmh"]["atlas"]),  # type: ignore[index]
@@ -252,18 +289,8 @@ def stage_registration(config: Mapping[str, object], participant: Participant, p
         float(config["wmh"].get("registration_brain_mask_dice_min", 0.70)),  # type: ignore[index]
         float(config["wmh"].get("registration_brain_mask_center_distance_max_mm", 15.0)),  # type: ignore[index]
     )
-    details["registration_input_t1"] = str(skullstripped_t1)
-    details["t1_brain_mask"] = str(brain_mask)
-    details["flair_brain_mask"] = str(flair_mask)
-    details["skullstrip_method"] = "FreeSurfer_SynthStrip_v7.4.1_model_v1"
-    details["flair_skullstrip_method"] = "FreeSurfer_SynthStrip_v7.4.1_model_v1"
-    details["synthstrip_reused"] = synthstrip_reused
-    details["flair_synthstrip_reused"] = flair_synthstrip_reused
-    details["synthstrip_provenance"] = str(synthstrip_provenance)
-    details["flair_synthstrip_provenance"] = str(flair_synthstrip_provenance)
-    details["synthstrip_source_commit"] = str(synthstrip["source_commit"])  # type: ignore[index]
-    details["synthstrip_model_sha256"] = str(synthstrip["model_sha256"])  # type: ignore[index]
-    details["synthstrip_border_mm"] = float(synthstrip["border_mm"])  # type: ignore[index]
+    details.update(skullstrip_details)
+    details["registration_execution_device"] = "cpu"
     return details
 
 
@@ -354,7 +381,8 @@ def stage_wmh(config: Mapping[str, object], participant: Participant, profile: s
     )
     corrected = Path(str(replacement["final_wmh"]))
     atlas_native = Path(registration_status["details"]["atlas_native_flair"])
-    raw = extract_wmh20_ml(corrected, atlas_native)
+    grid_details: Dict[str, object] = {}
+    raw = extract_wmh20_ml(corrected, atlas_native, grid_details=grid_details)
     z = chung_zscore(raw, participant.sex, _absolute(root, config["wmh"]["residual_info"]))  # type: ignore[index]
     feature_path = output / "wmh_features.json"
     _write_json(
@@ -367,6 +395,7 @@ def stage_wmh(config: Mapping[str, object], participant: Participant, profile: s
             "z_chung": z,
             "age_adjustment_applied": False,
             "contralateral_correction": replacement,
+            "wmh_atlas_grid": grid_details,
         },
     )
     details: Dict[str, object] = {
@@ -375,6 +404,7 @@ def stage_wmh(config: Mapping[str, object], participant: Participant, profile: s
         "corrected_wmh": str(corrected),
         "feature_json": str(feature_path),
         "age_adjustment_applied": False,
+        "wmh_atlas_grid": grid_details,
     }
     details.update(replacement)
     return details
@@ -553,10 +583,15 @@ def aggregate_outputs(config: Mapping[str, object], participants: Sequence[Parti
     for participant in participants:
         stage_states = {
             stage: _status(config, participant, stage)
-            for stage in ("registration", "lesion", "wmh_seg", "wmh", "t1", "qc", "cleanup", "lowres")
+            for stage in ("skullstrip", "registration", "lesion", "wmh_seg", "wmh", "t1", "qc", "cleanup", "lowres")
         }
-        wmh_ok = stage_states["wmh"]["status"] == "pass"
-        t1_ok = stage_states["t1"]["status"] == "pass"
+        processing_failed = any(
+            stage_states[stage]["status"] != "pass"
+            for stage in ("skullstrip", "registration", "lesion", "wmh_seg", "wmh", "t1", "qc")
+        )
+        # 失败病例的影像产出已由cleanup删除，不能读取较早阶段遗留的pass状态。
+        wmh_ok = not processing_failed and stage_states["wmh"]["status"] == "pass"
+        t1_ok = not processing_failed and stage_states["t1"]["status"] == "pass"
         wmh_data: Dict[str, object] = {}
         t1_data: Dict[str, object] = {}
         if wmh_ok:
@@ -667,19 +702,64 @@ def _safe_managed_path(path: Path, subject_root: Path) -> Path:
     return resolved
 
 
+def _cleanup_failed_outputs(
+    config: Mapping[str, object], participant: Participant, failed_stages: Sequence[str]
+) -> Dict[str, object]:
+    """失败病例只保留status和logs，删除影像产出和集中QC图。"""
+
+    subject_root = participant_dir(config, participant)
+    deleted_entries: List[str] = []
+    if subject_root.is_dir():
+        for candidate in sorted(subject_root.iterdir(), key=lambda value: value.name):
+            if candidate.name in {"status", "logs"}:
+                continue
+            resolved = _safe_managed_path(candidate, subject_root)
+            if candidate.is_dir():
+                symlinks = [path for path in candidate.rglob("*") if path.is_symlink()]
+                if symlinks:
+                    raise RuntimeError("拒绝递归清理含软链接的失败病例目录: {}".format(symlinks[0]))
+                shutil.rmtree(str(resolved))
+            elif candidate.is_file():
+                resolved.unlink()
+            else:
+                raise RuntimeError("拒绝清理非普通文件或目录: {}".format(candidate))
+            deleted_entries.append(str(resolved))
+
+    central_qc = qc_dir(config)
+    deleted_qc: List[str] = []
+    if central_qc.is_dir():
+        central_qc_resolved = central_qc.resolve()
+        for candidate in sorted(central_qc.glob("{}_*.png".format(participant.participant_id))):
+            if candidate.parent.resolve() != central_qc_resolved or candidate.is_symlink() or not candidate.is_file():
+                raise RuntimeError("拒绝清理非中央QC普通文件: {}".format(candidate))
+            resolved = candidate.resolve()
+            candidate.unlink()
+            deleted_qc.append(str(resolved))
+
+    return {
+        "policy": "error_records_only_v1",
+        "failed_stages": list(failed_stages),
+        "deleted_subject_entries": deleted_entries,
+        "deleted_qc_files": deleted_qc,
+        "retained_directories": [str(subject_root / "status"), str(subject_root / "logs")],
+        "failed_case_intermediates_retained": False,
+    }
+
+
 def stage_cleanup(config: Mapping[str, object], participant: Participant) -> Dict[str, object]:
-    """四图QC成功后删除可重建大文件；处理失败病例不会进入本阶段。"""
+    """成功病例最小保留；失败病例仅保留错误状态与日志。"""
 
     subject_root = participant_dir(config, participant)
     qc_status = _status(config, participant, "qc")
-    if qc_status.get("status") != "pass" or qc_status.get("details", {}).get("figure_count") != 4:
-        raise RuntimeError("只有四图QC成功病例才允许自动清理")
     states = {
         stage: _status(config, participant, stage)
-        for stage in ("lesion", "registration", "wmh_seg", "wmh", "t1")
+        for stage in ("skullstrip", "lesion", "registration", "wmh_seg", "wmh", "t1")
     }
-    if any(state.get("status") != "pass" for state in states.values()):
-        raise RuntimeError("存在失败处理节点，保留中间件供诊断")
+    failed_stages = [stage for stage, state in states.items() if state.get("status") != "pass"]
+    if qc_status.get("status") != "pass" or qc_status.get("details", {}).get("figure_count") != 4:
+        failed_stages.append("qc")
+    if failed_stages:
+        return _cleanup_failed_outputs(config, participant, failed_stages)
 
     registration = states["registration"]["details"]
     lesion = states["lesion"]["details"]
@@ -779,7 +859,7 @@ def stage_cleanup(config: Mapping[str, object], participant: Participant) -> Dic
         "deleted_directories": deleted_directories,
         "bytes_removed": total_bytes,
         "retained_outputs": sorted(str(path) for path in retained),
-        "failed_cases_are_not_cleaned": True,
+        "failed_cases_are_cleaned_to_error_records": True,
         "large_nonlinear_transforms_retained": False,
     }
     _write_json(manifest, details)
