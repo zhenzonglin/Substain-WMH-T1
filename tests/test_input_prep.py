@@ -1,3 +1,4 @@
+import os
 from pathlib import Path
 
 import pandas as pd
@@ -24,6 +25,7 @@ def _config(root: Path) -> dict:
     }
 
 
+@pytest.mark.skipif(os.name == "nt", reason="Windows未启用开发者模式时不能建立测试符号链接")
 def test_recursive_folder_matching_builds_sessionless_bids_links(tmp_path: Path) -> None:
     config = _config(tmp_path)
     (tmp_path / "config").mkdir()
@@ -49,6 +51,7 @@ def test_recursive_folder_matching_builds_sessionless_bids_links(tmp_path: Path)
     assert "ses-" not in table.loc[0, "t1w"]
 
 
+@pytest.mark.skipif(os.name == "nt", reason="Windows未启用开发者模式时不能建立测试符号链接")
 def test_prepare_inputs_does_not_touch_unchanged_contract(tmp_path: Path) -> None:
     config = _config(tmp_path)
     (tmp_path / "config").mkdir()

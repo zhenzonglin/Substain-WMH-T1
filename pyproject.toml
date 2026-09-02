@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "substain-features"
-version = "1.0.9"
+version = "1.1.0rc1"
 description = "WMH-T1 40维结构影像特征工程"
 requires-python = ">=3.8"
 dependencies = [

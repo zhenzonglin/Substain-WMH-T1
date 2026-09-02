@@ -4,12 +4,15 @@ import sys
 
 import nibabel as nib
 import numpy as np
+import pytest
 
 from substain_features.wmh import WMH_FEATURES, _find_residual_arrays, chung_zscore, extract_wmh20_ml, run_wmh_synthseg
 
 
 def test_chung_formula_matches_matlab(project_root: Path) -> None:
     residual = project_root / "resources/normative/Residual_Info.mat"
+    if not residual.is_file():
+        pytest.skip("源码发布不包含受限制Residual_Info.mat")
     male, female = _find_residual_arrays(residual)
     volumes = {name: float(index + 1) / 10.0 for index, name in enumerate(WMH_FEATURES)}
     observed = chung_zscore(volumes, "female", residual)

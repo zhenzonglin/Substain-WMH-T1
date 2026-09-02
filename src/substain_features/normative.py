@@ -3,13 +3,12 @@
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, List, Mapping, Optional, Sequence, Tuple
+from typing import Dict, Mapping, Optional, Tuple
 
 import numpy as np
 import pandas as pd
 
-from .mapping import aggregate_macro20
-from .t1 import display_name_map, genmind_native145_labels, nonventricular_tissue_volume_ml
+from .t1 import display_name_map, genmind_native145_labels
 
 
 @dataclass(frozen=True)

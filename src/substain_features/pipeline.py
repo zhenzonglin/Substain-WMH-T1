@@ -3,7 +3,7 @@
 import json
 import shutil
 from pathlib import Path
-from typing import Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
+from typing import Dict, List, Mapping, Sequence
 
 import nibabel as nib
 import numpy as np
@@ -17,7 +17,6 @@ from .images import (
     save_overlay,
 )
 from .lowres import run_lowres_validation
-from .mapping import write_macro_mapping
 from .normative import GenMINDGlobalV1Provider
 from .qc_review import load_review_table
 from .registration import apply_transforms, register_and_warp_atlas
@@ -25,7 +24,7 @@ from .resources import sha256
 from .schema import Participant
 from .symmetry import run_contralateral_replacement
 from .synthstrip import run_synthstrip
-from .t1 import display_name_map, extract_t1_features, run_nichart_dlmuse, write_macro20_segmentation
+from .t1 import extract_t1_features, run_nichart_dlmuse, write_macro20_segmentation
 from .wmh import WMH_FEATURES, chung_zscore, extract_wmh20_ml, run_wmh_synthseg
 
 
@@ -567,8 +566,6 @@ def aggregate_outputs(config: Mapping[str, object], participants: Sequence[Parti
     tables.mkdir(parents=True, exist_ok=True)
     mapping = pd.read_csv(_absolute(root, config["t1"]["macro_mapping"]), sep="\t")  # type: ignore[index]
     macro_ids = mapping.sort_values("macro_index")["macro_id"].drop_duplicates().astype(str).tolist()
-    display_names = display_name_map(_absolute(root, config["t1"]["derived_mapping"]))  # type: ignore[index]
-
     wmh_raw_rows: List[Dict[str, object]] = []
     wmh_z_rows: List[Dict[str, object]] = []
     native_rows: List[Dict[str, object]] = []

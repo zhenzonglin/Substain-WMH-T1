@@ -1,6 +1,7 @@
 from pathlib import Path
 
 import numpy as np
+import pytest
 
 from substain_features.mapping import (
     aggregate_macro20,
@@ -11,8 +12,15 @@ from substain_features.mapping import (
 )
 
 
+def _dictionaries(project_root: Path) -> Path:
+    path = project_root / "resources/third_party/NiChart_DLMUSE/NiChart_DLMUSE/shared/dicts"
+    if not path.is_dir():
+        pytest.skip("源码发布不包含受限制NiChart_DLMUSE字典")
+    return path
+
+
 def test_muse_macro20_has_full_unique_gm119_coverage(project_root: Path) -> None:
-    dictionaries = project_root / "resources/third_party/NiChart_DLMUSE/NiChart_DLMUSE/shared/dicts"
+    dictionaries = _dictionaries(project_root)
     table = build_macro_mapping(
         dictionaries / "MUSE_mapping_consecutive_indices.csv",
         dictionaries / "MUSE_mapping_derived_rois.csv",
@@ -26,7 +34,7 @@ def test_muse_macro20_has_full_unique_gm119_coverage(project_root: Path) -> None
 
 
 def test_macro20_volume_conservation(project_root: Path) -> None:
-    dictionaries = project_root / "resources/third_party/NiChart_DLMUSE/NiChart_DLMUSE/shared/dicts"
+    dictionaries = _dictionaries(project_root)
     table = build_macro_mapping(
         dictionaries / "MUSE_mapping_consecutive_indices.csv",
         dictionaries / "MUSE_mapping_derived_rois.csv",

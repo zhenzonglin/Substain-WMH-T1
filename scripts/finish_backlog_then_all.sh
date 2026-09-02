@@ -23,11 +23,17 @@ config="${root}/config/config.yaml"
 core_python="${root}/envs/core-venv/bin/python"
 snakefile="${root}/workflow/Snakefile"
 derivatives="${root}/derivatives/substain_features"
-targets_file="${root}/logs/backlog_cleanup_targets_v1.0.8.txt"
-participants_file="${root}/logs/backlog_participants_v1.0.8.txt"
-remaining_targets_file="${root}/logs/wave_cleanup_targets_v1.0.8.txt"
-remaining_participants_file="${root}/logs/wave_participants_v1.0.8.txt"
-archive_root="${root}/archive/interrupted-status-before-v1.0.8-$(date +%Y%m%d_%H%M%S)"
+targets_file="${root}/logs/backlog_cleanup_targets.txt"
+participants_file="${root}/logs/backlog_participants.txt"
+remaining_targets_file="${root}/logs/wave_cleanup_targets.txt"
+remaining_participants_file="${root}/logs/wave_participants.txt"
+archive_root="${root}/archive/interrupted-status-$(date +%Y%m%d_%H%M%S)"
+
+gpu_device="${CUDA_VISIBLE_DEVICES:-0}"
+if [[ ! "${gpu_device}" =~ ^[0-9]+$ ]]; then
+  echo "本发布版的全量GPU入口只接受一张GPU编号；收到CUDA_VISIBLE_DEVICES=${gpu_device}" >&2
+  exit 2
+fi
 
 mkdir -p "${root}/logs"
 cd "${root}"
@@ -35,7 +41,7 @@ cd "${root}"
 # CPU重任务不再划分固定阶段槽；Snakemake依据总核心数、每例线程数和优先级
 # 动态填充空闲核心。GPU仍由唯一资源令牌和进程锁串行化。
 
-export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0}"
+export CUDA_VISIBLE_DEVICES="${gpu_device}"
 export OMP_NUM_THREADS="${OMP_NUM_THREADS:-${cpu_threads}}"
 export MKL_NUM_THREADS="${MKL_NUM_THREADS:-${cpu_threads}}"
 export ITK_GLOBAL_DEFAULT_NUMBER_OF_THREADS="${ITK_GLOBAL_DEFAULT_NUMBER_OF_THREADS:-${cpu_threads}}"
@@ -130,7 +136,7 @@ else
   backlog_wave_count=0
 fi
 
-echo "严格调度资源: cores=${cores}, heavy_threads=${cpu_threads}, cpu_custom_caps=none, gpu=1"
+echo "严格调度资源: cores=${cores}, heavy_threads=${cpu_threads}, cpu_custom_caps=none, gpu=1, gpu_device=${gpu_device}"
 echo "积压严格波次: batch_size=${batch_size}, backlog=${backlog_count}, waves=${backlog_wave_count}"
 
 print_wave_plan() {
@@ -175,7 +181,8 @@ run_wave() {
     "active_config_file=${config}" \
     "selected_participant=all" \
     "profile=gpu" \
-    "gpu_devices=0"
+    "gpu_devices=${gpu_device}" \
+    "cpu_threads_per_job=${cpu_threads}"
 
   for target in "${wave_targets[@]}"; do
     if [[ ! -f "${target}" ]]; then

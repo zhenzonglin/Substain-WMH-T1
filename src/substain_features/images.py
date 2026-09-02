@@ -80,11 +80,15 @@ def physical_grid_diagnostics(
         second_world = (second_affine @ second_corners.T).T[:, :3]
         max_displacement = float(np.linalg.norm(first_world - second_world, axis=1).max())
     shape_equal = first_shape == second_shape
+    threshold_mm = float(max_corner_displacement_mm)
     matches = bool(
         shape_equal
         and affines_finite
         and max_displacement is not None
-        and max_displacement <= max_corner_displacement_mm
+        and (
+            max_displacement <= threshold_mm
+            or np.isclose(max_displacement, threshold_mm, rtol=0.0, atol=1e-9)
+        )
     )
     return {
         "shape_first": list(first_shape),
@@ -93,7 +97,7 @@ def physical_grid_diagnostics(
         "affines_finite": affines_finite,
         "max_affine_abs_diff": max_affine_abs_diff,
         "max_corner_displacement_mm": max_displacement,
-        "threshold_mm": float(max_corner_displacement_mm),
+        "threshold_mm": threshold_mm,
         "matches": matches,
     }
 

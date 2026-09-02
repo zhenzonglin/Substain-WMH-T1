@@ -1,4 +1,4 @@
-# WMH–T1 V1.0代码与数据流导读
+# WMH–T1 V1.1.0-rc1代码与数据流导读
 
 ## 1. 功能分区
 
@@ -20,7 +20,7 @@ Substain/
 ## 2. 总控入口
 
 ```bash
-./run_pipeline.sh <mode> [participant|all] [auto|gpu|cpu] [max_jobs]
+./run_pipeline.sh <mode> [participant|all] [auto|gpu|cpu] [total_cores]
 ```
 
 | 序号 | mode | 脚本 | 作用 |
@@ -158,7 +158,7 @@ DLICV/DLMUSE产生最终分割。145个原生ROI中保留119个灰质ROI，再�
 QC材料生成成功，不代表人工判读通过。`images._orthogonal_qc_views()`保持物理比例，并按标准临床
 放射学方向直接显示冠状、矢状和轴位，不对RAS标准化后的切片追加旋转。
 
-`pipeline.stage_cleanup()`只在四图成功且所有计算节点通过后执行。它逐个验证清理目标位于当前受试者衍生目录，保留最终分割/特征/日志，删除可重建影像和DLMUSE临时目录，并写`cleanup_manifest.json`。失败病例不清理。
+`pipeline.stage_cleanup()`只在四图成功且所有计算节点通过后执行。它逐个验证清理目标位于当前受试者衍生目录，保留最终分割/特征/日志，删除可重建影像和DLMUSE临时目录，并写`cleanup_manifest.json`。失败病例由`error_records_only_v1`删除影像中间件，只保留`status/`与`logs/`。
 
 ### 03 人工QC
 
@@ -183,14 +183,14 @@ Python标准库`ThreadingHTTPServer`只绑定`127.0.0.1`。浏览器2×2显示�
 
 ## 4. GPU与200任务并发
 
-`run_pipeline.sh`固定：
+`run_pipeline.sh`的默认波次与GPU策略为：
 
 ```text
 MAX_PARALLEL_JOBS=200
 GPU_POLICY=auto_one_job_per_device
 ```
 
-`cli.run_command()`调用`gpu_pool.detect_gpu_ids()`读取`nvidia-smi`设备编号，并把GPU总量传给Snakemake。GPU规则再由`gpu_pool.run_with_gpu_lock()`使用`flock`占用单张卡，并设置`CUDA_VISIBLE_DEVICES`。因此GPU数决定GPU推理并发，CPU/轻量规则仍可在总任务池内并行。没有GPU时`auto`切到CPU；显式`gpu`但未检测到设备时立即失败。
+`cli.run_command()`调用`gpu_pool.detect_gpu_ids()`读取GPU设备编号。V1.1.0-rc1的全量GPU入口要求`CUDA_VISIBLE_DEVICES`只指定一张卡，并由`gpu_pool.run_with_gpu_lock()`使用`flock`保证同一时刻只运行一个GPU任务；本RC不纳入工作站2的双GPU专用调度。CPU/轻量规则仍可在总核心池内并行。`CPU_THREADS_PER_JOB`会作为`cpu_threads_per_job`显式传入Snakefile，保证日志、线程环境和Snakemake资源一致。没有GPU时`auto`切到CPU；显式`gpu`但未检测到设备时立即失败。
 
 ## 5. 关键表格
 
@@ -205,4 +205,4 @@ GPU_POLICY=auto_one_job_per_device
 | `qc_reviews.tsv` | 可读人工审核记录 |
 | `resource_manifest.tsv` | 固定资源SHA256 |
 
-V1.0保持40维特征定义不变，仅修订输入兼容、病灶空间、QC门控、保留策略和并发调度。
+V1.1.0-rc1保持40维特征定义不变，仅整合物理网格容差、运行时间记录、失败保留策略、通用监测和可移植调度入口。

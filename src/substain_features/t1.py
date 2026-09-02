@@ -8,7 +8,7 @@ import shutil
 import subprocess
 import sys
 from pathlib import Path
-from typing import Dict, Iterable, List, Mapping, Sequence, Tuple
+from typing import Dict, List, Mapping, Sequence, Tuple
 
 import nibabel as nib
 import numpy as np
@@ -99,7 +99,6 @@ def extract_native_volumes_ml(segmentation: Path, labels: Sequence[int]) -> Dict
     data = np.rint(image.get_fdata()).astype(np.int16)
     unique, counts = np.unique(data, return_counts=True)
     count_map = {int(label): int(count) for label, count in zip(unique, counts)}
-    unexpected = sorted(set(count_map) - {0} - set(labels))
     # 允许分割中存在 GenMIND 未使用的 6 个标签，但记录交由 QC；这里不静默替换标签。
     voxel_ml = float(np.prod(image.header.get_zooms()[:3])) / 1000.0
     return {int(label): float(count_map.get(int(label), 0) * voxel_ml) for label in labels}

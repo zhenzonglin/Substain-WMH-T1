@@ -3,6 +3,8 @@ import sys
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
+
 from substain_features.gpu_pool import detect_gpu_ids, run_with_gpu_lock
 
 
@@ -14,6 +16,7 @@ def test_gpu_detection_reads_all_device_indices(monkeypatch) -> None:
     assert detect_gpu_ids({}) == ["0", "2"]
 
 
+@pytest.mark.skipif(os.name == "nt", reason="fcntl文件锁只在Linux/Unix运行")
 def test_gpu_lock_sets_one_visible_device(tmp_path: Path) -> None:
     output = tmp_path / "device.txt"
     code = "import os,pathlib; pathlib.Path({!r}).write_text(os.environ['CUDA_VISIBLE_DEVICES'])".format(str(output))

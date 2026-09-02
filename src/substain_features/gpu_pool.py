@@ -3,12 +3,16 @@
 from __future__ import annotations
 
 import argparse
-import fcntl
 import os
 import subprocess
 import time
 from pathlib import Path
 from typing import List, Mapping, Optional, Sequence
+
+try:
+    import fcntl
+except ImportError:  # pragma: no cover - Windows只用于源码检查，正式计算要求Linux。
+    fcntl = None  # type: ignore[assignment]
 
 
 def detect_gpu_ids(environment: Optional[Mapping[str, str]] = None) -> List[str]:
@@ -36,6 +40,8 @@ def detect_gpu_ids(environment: Optional[Mapping[str, str]] = None) -> List[str]
 def run_with_gpu_lock(command: Sequence[str], gpu_ids: Sequence[str], lock_dir: Path) -> int:
     """等待任一GPU锁，持锁运行子进程并设置独立CUDA_VISIBLE_DEVICES。"""
 
+    if fcntl is None:
+        raise RuntimeError("GPU文件锁需要Linux/Unix fcntl")
     if not command:
         raise ValueError("GPU包装器缺少待执行命令")
     if not gpu_ids:

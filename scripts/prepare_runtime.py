@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 """避免跨 Windows/WSL 多层 shell 引号，机械生成受控运行时副本。"""
 
-import os
 import shutil
 from pathlib import Path
 

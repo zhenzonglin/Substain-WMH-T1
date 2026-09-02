@@ -31,7 +31,7 @@ SUBSTAIN_WMH_MODEL="${project_root}/resources/models/WMH-SynthSeg_v10_231110.pth
 "${environment_root}/t1/bin/python" -c "from pathlib import Path; import DLICV,DLMUSE,NiChart_DLMUSE; from substain_features.t1 import dlmuse_model_provenance; dlicv=Path(DLICV.__file__).parent; assert any(path.is_file() and path.stat().st_size>0 for path in dlicv.rglob('*') if path.suffix in {'.pth','.pt','.onnx','.h5'}); print('t1_packages_and_models_loaded',dlmuse_model_provenance())"
 "${environment_root}/t1/bin/python" "${project_root}/scripts/verify_genmind_kde.py"
 
-# V1.0不硬编码病例或猜测病灶空间。只有当前配置可生成严格输入契约时才运行一例。
+# V1.1不硬编码病例或猜测病灶空间。只有当前配置可生成严格输入契约时才运行一例。
 if "${environment_root}/core-venv/bin/python" -m substain_features.cli prepare-inputs \
   --config-file "${project_root}/config/config.yaml"; then
   participant_id="$(awk -F '\t' 'NR==2 {print $1; exit}' "${project_root}/config/participants.tsv")"

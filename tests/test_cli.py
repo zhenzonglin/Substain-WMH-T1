@@ -1,4 +1,5 @@
 from pathlib import Path
+import sys
 from types import SimpleNamespace
 
 import click
@@ -19,6 +20,7 @@ def test_snakemake_target_precedes_config_values(project_root: Path, monkeypatch
     monkeypatch.setattr(cli, "shutil_which", lambda name: "/fake/snakemake")
     monkeypatch.setattr(cli, "detect_gpu_ids", lambda: [])
     monkeypatch.setattr(cli.subprocess, "run", fake_run)
+    monkeypatch.setitem(sys.modules, "snakemake", SimpleNamespace())
     # 此测试只验证命令参数顺序；离线包按设计不携带真实participants.tsv。
     monkeypatch.setattr(cli, "_context", lambda path: ({}, project_root, []))
     result = CliRunner().invoke(
@@ -44,6 +46,39 @@ def test_snakemake_target_precedes_config_values(project_root: Path, monkeypatch
     assert command.index("--dry-run") < command.index("--config")
     assert "active_config_file={}".format((project_root / "config" / "config.yaml").resolve()) in command
     assert "t1_cpu=2" in command
+    assert "cpu_threads_per_job=8" in command
+
+
+def test_cpu_threads_environment_reaches_snakemake(project_root: Path, monkeypatch) -> None:
+    captured = {}
+
+    def fake_run(command, **kwargs):
+        captured["command"] = command
+        return SimpleNamespace(returncode=0)
+
+    monkeypatch.setenv("CPU_THREADS_PER_JOB", "4")
+    monkeypatch.setattr(cli, "shutil_which", lambda name: "/fake/snakemake")
+    monkeypatch.setattr(cli, "detect_gpu_ids", lambda: [])
+    monkeypatch.setattr(cli.subprocess, "run", fake_run)
+    monkeypatch.setitem(sys.modules, "snakemake", SimpleNamespace())
+    monkeypatch.setattr(cli, "_context", lambda path: ({}, project_root, []))
+    result = CliRunner().invoke(
+        cli.main,
+        ["run", "--profile", "cpu", "--skip-prepare", "--dry-run"],
+    )
+    assert result.exit_code == 0, result.output
+    assert "cpu_threads_per_job=4" in captured["command"]
+
+
+def test_invalid_cpu_threads_environment_is_rejected(project_root: Path, monkeypatch) -> None:
+    monkeypatch.setenv("CPU_THREADS_PER_JOB", "0")
+    monkeypatch.setattr(cli, "_context", lambda path: ({}, project_root, []))
+    result = CliRunner().invoke(
+        cli.main,
+        ["run", "--profile", "cpu", "--skip-prepare", "--dry-run"],
+    )
+    assert result.exit_code != 0
+    assert "CPU_THREADS_PER_JOB必须为正整数" in result.output
 
 
 def test_guarded_stage_failure_returns_nonzero(tmp_path: Path, monkeypatch) -> None:
@@ -86,8 +121,10 @@ def test_lesion_order_only_dependencies_are_ancient(project_root: Path) -> None:
     """病灶状态更新不能误触发不消费病灶数值的WMH分割或T1重算。"""
 
     snakefile = (project_root / "workflow" / "Snakefile").read_text(encoding="utf-8")
-    assert 'ancient(stage_pattern("lesion"))' in snakefile
-    assert 'lesion=ancient(stage_pattern("lesion"))' in snakefile
+    wmh_segmentation = snakefile.split("rule wmh_segmentation:", 1)[1].split("rule registration:", 1)[0]
+    t1 = snakefile.split("rule t1:", 1)[1].split("rule qc:", 1)[0]
+    assert 'stage_pattern("lesion")' not in wmh_segmentation
+    assert 'wmh=ancient(stage_pattern("wmh"))' in t1
 
 
 def test_all_controller_finishes_computation_without_manual_qc_gate(project_root: Path) -> None:

@@ -6,7 +6,7 @@ import shlex
 import subprocess
 import sys
 from pathlib import Path
-from typing import Dict, List, Mapping, Optional
+from typing import List, Mapping, Optional
 
 import click
 
@@ -116,10 +116,18 @@ def run_command(
         prepare_inputs(initial_config)
     config, root, participants = _context(config_file)
     select_participants(participants, participant_id)
-    cpu_threads_per_job = max(
-        1,
-        int(config.get("execution", {}).get("cpu_threads_per_job", 8)),
-    )
+    configured_threads = config.get("execution", {}).get("cpu_threads_per_job", 8)
+    raw_threads = os.environ.get("CPU_THREADS_PER_JOB", str(configured_threads)).strip()
+    try:
+        cpu_threads_per_job = int(raw_threads)
+    except ValueError as exc:
+        raise click.ClickException(
+            "CPU_THREADS_PER_JOB必须为正整数，收到: {}".format(raw_threads)
+        ) from exc
+    if cpu_threads_per_job < 1:
+        raise click.ClickException(
+            "CPU_THREADS_PER_JOB必须为正整数，收到: {}".format(raw_threads)
+        )
     # 为两个上游SynthStrip保留CPU空间；T1最多同时两例；其余重型CPU槽
     # 优先用于registration -> lesion -> WMH特征，避免DLICV铺满全部核心。
     skullstrip_slots = 2 if cores >= 3 * cpu_threads_per_job else 1
@@ -171,6 +179,7 @@ def run_command(
             "selected_participant={}".format(participant_id),
             "profile={}".format(selected_profile),
             "gpu_devices={}".format(",".join(gpu_ids)),
+            "cpu_threads_per_job={}".format(cpu_threads_per_job),
         ]
     )
     completed = subprocess.run(command, cwd=str(root), check=False)

@@ -3,6 +3,8 @@ set -euo pipefail
 
 # 禁网工作站：从项目 wheel 缓存重建 core，并从 conda-pack 归档恢复 WMH/T1。
 project_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
+project_version="$(PYTHONPATH="${project_root}/src" python3 -c 'from substain_features import __version__; print(__version__)')"
+package_requirement="substain-features==${project_version}"
 test -d "${project_root}/wheels/core"
 test -f "${project_root}/envs/offline/wmh-env.tar.gz"
 test -f "${project_root}/envs/offline/t1-env.tar.gz"
@@ -29,7 +31,7 @@ restore_packed_env() {
     PATH="${target}/bin:${PATH}" "${target}/bin/conda-unpack"
   fi
   PYTHONNOUSERSITE=1 "${target}/bin/python" -m pip install --no-index --no-deps --force-reinstall \
-    --only-binary=:all: --find-links "${wheel_dir}" substain-features
+    --only-binary=:all: --find-links "${wheel_dir}" "${package_requirement}"
   PYTHONNOUSERSITE=1 "${target}/bin/python" -m pip check
 }
 
@@ -45,7 +47,8 @@ fi
 PYTHONNOUSERSITE=1 "${core_target}/bin/python" -m pip install --no-index --upgrade \
   --only-binary=:all: --find-links "${project_root}/wheels/core" pip setuptools wheel
 PYTHONNOUSERSITE=1 "${core_target}/bin/python" -m pip install --no-index --force-reinstall \
-  --only-binary=:all: --find-links "${project_root}/wheels/core" substain-features snakemake pytest pulp
+  --only-binary=:all: --find-links "${project_root}/wheels/core" \
+  "${package_requirement}" snakemake pytest pulp
 PYTHONNOUSERSITE=1 "${core_target}/bin/python" -m pip check
 
 # 项目 wheel 是纯 Python 包，三套缓存中的文件完全相同。统一从 core wheelhouse

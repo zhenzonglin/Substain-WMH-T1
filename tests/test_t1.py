@@ -1,3 +1,4 @@
+import os
 from pathlib import Path
 from types import SimpleNamespace
 import sys
@@ -32,7 +33,7 @@ def test_nichart_runtime_is_forced_offline(tmp_path: Path, monkeypatch) -> None:
     assert Path(result["segmentation"]).is_file()
     assert captured["env"]["HF_HUB_OFFLINE"] == "1"
     assert captured["env"]["TRANSFORMERS_OFFLINE"] == "1"
-    assert captured["env"]["PATH"].split(":", 1)[0] == str(Path(sys.executable).resolve().parent)
+    assert captured["env"]["PATH"].split(os.pathsep, 1)[0] == str(Path(sys.executable).resolve().parent)
 
 
 def test_nichart_falls_back_to_current_environment_bin(tmp_path: Path, monkeypatch) -> None:

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""工作站1主进程、活动子任务和阶段进度的30秒只读监测。"""
+"""主进程、活动子任务和阶段进度的只读监测。"""
 
 import argparse
 import csv
@@ -198,7 +198,8 @@ def main_view(root: Path, pid_file: Path, processes: Sequence[ProcessInfo]) -> s
     project_processes = [
         process
         for process in processes
-        if str(root) in process.args and "monitor_ws1.py" not in process.args
+        if str(root) in process.args
+        and "monitor_pipeline.py" not in process.args
     ]
     project_rss_kb = sum(process.rss_kb for process in project_processes)
     mem = _meminfo()
@@ -207,7 +208,7 @@ def main_view(root: Path, pid_file: Path, processes: Sequence[ProcessInfo]) -> s
     swap_used_kb = max(0, mem.get("SwapTotal", 0) - mem.get("SwapFree", 0))
     oom_count = _oom_count()
     gpus = _gpu_rows()
-    baseline = _baseline(root / "logs" / "ws1_monitor_baseline.json", swap_used_kb, oom_count)
+    baseline = _baseline(root / "logs" / "monitor_baseline.json", swap_used_kb, oom_count)
     orphan = [process for process in project_processes if pgid is not None and process.pgid != pgid]
     warnings = []
     if total_kb and available_kb / total_kb < 0.10:
@@ -226,7 +227,7 @@ def main_view(root: Path, pid_file: Path, processes: Sequence[ProcessInfo]) -> s
 
     timestamp = datetime.now(timezone.utc).isoformat()
     _append_tsv(
-        root / "logs" / "ws1_resource_history.tsv",
+        root / "logs" / "resource_history.tsv",
         (
             "timestamp_utc", "main_pid", "main_alive", "pgid", "project_processes",
             "project_rss_kb", "mem_total_kb", "mem_available_kb", "swap_used_kb",
@@ -400,7 +401,7 @@ def _record_runtime_history(
     participant_ids: Sequence[str],
     statuses: Dict[Tuple[str, str], Dict[str, object]],
 ) -> None:
-    output = root / "logs" / "ws1_stage_runtime_history.tsv"
+    output = root / "logs" / "stage_runtime_history.tsv"
     known: Set[Tuple[str, str, str]] = set()
     if output.is_file():
         with output.open("r", encoding="utf-8", newline="") as handle:
@@ -459,7 +460,9 @@ def main() -> int:
     parser.add_argument("--once", action="store_true")
     args = parser.parse_args()
     root = args.project_root.resolve()
-    pid_file = args.pid_file or (root / "logs" / "full_run_v1.0.9.pid")
+    pid_file = args.pid_file or (root / "logs" / "full_run.pid")
+    if not pid_file.is_absolute():
+        pid_file = root / pid_file
     if args.interval <= 0:
         raise SystemExit("--interval必须大于0")
     while True:

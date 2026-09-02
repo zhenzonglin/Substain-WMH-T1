@@ -9,6 +9,8 @@ archive="${project_parent}/${project_name}_offline.tar.gz"
 contents="${project_parent}/${project_name}_offline.contents.txt"
 checksum="${archive}.sha256"
 verification="${project_parent}/${project_name}_offline.verification.json"
+project_version="$(PYTHONPATH="${project_root}/src" python3 -c 'from substain_features import __version__; print(__version__)')"
+project_wheel="${project_root}/wheels/core/substain_features-${project_version}-py3-none-any.whl"
 
 if [[ -e "${archive}" || -e "${contents}" || -e "${checksum}" || -e "${verification}" ]]; then
   echo "目标文件已存在，拒绝覆盖：${project_parent}/${project_name}_offline.*" >&2
@@ -18,7 +20,7 @@ fi
 # 打包前先确认当前资源与环境归档没有损坏。
 "${project_root}/run_pipeline.sh" offline
 (cd "${project_root}/envs/offline" && sha256sum -c environment_archives.sha256)
-test -f "${project_root}/wheels/core/substain_features-1.0.0-py3-none-any.whl"
+test -f "${project_wheel}"
 test -x "${project_root}/resources/tools/ants-2.5.4/bin/antsRegistration"
 
 temporary_archive="$(mktemp --tmpdir="${project_parent}" ".${project_name}_offline.tar.gz.tmp.XXXXXX")"
@@ -80,7 +82,9 @@ mv -- "${temporary_archive}" "${archive}"
 mv -- "${temporary_contents}" "${contents}"
 (cd "${project_parent}" && sha256sum "$(basename "${archive}")" > "$(basename "${checksum}")")
 "${project_root}/envs/core-venv/bin/python" "${project_root}/scripts/verify_offline_package.py" \
-  --archive "${archive}" --contents "${contents}" --output "${verification}"
+  --archive "${archive}" --contents "${contents}" --output "${verification}" \
+  --project-name "${project_name}" \
+  --project-version "${project_version}"
 
 trap - EXIT
 echo "离线项目包：${archive}"

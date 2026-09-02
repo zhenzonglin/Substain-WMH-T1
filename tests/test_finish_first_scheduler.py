@@ -50,7 +50,12 @@ def _test_scheduler(project_root: Path, root: Path, statuses: dict) -> subproces
         capture_output=True,
         text=True,
         check=False,
-        env={**os.environ, "BACKLOG_LIST_ONLY": "1", "BATCH_SIZE": "200"},
+        env={
+            **os.environ,
+            "BACKLOG_LIST_ONLY": "1",
+            "BATCH_SIZE": "200",
+            "CUDA_VISIBLE_DEVICES": "2",
+        },
     )
 
 
@@ -95,6 +100,7 @@ def test_cpu_heavy_rules_share_only_the_global_core_pool(project_root: Path) -> 
     assert "finish_cpu" not in snakefile
     assert "skullstrip_cpu" not in snakefile
     assert "t1_cpu" not in snakefile
+    assert 'config.get("cpu_threads_per_job", EXECUTION_CONFIG.get("cpu_threads_per_job", 8))' in snakefile
 
 
 def test_full_gpu_entry_uses_strict_scheduler_but_single_subject_stays_direct(project_root: Path) -> None:
@@ -135,16 +141,42 @@ def test_strict_scheduler_uses_only_global_cores_and_one_gpu_token(
     )
     assert completed.returncode == 0, completed.stdout + completed.stderr
     assert (
-        "严格调度资源: cores=96, heavy_threads=8, cpu_custom_caps=none, gpu=1"
+        "严格调度资源: cores=96, heavy_threads=8, cpu_custom_caps=none, gpu=1, gpu_device=2"
         in completed.stdout
     )
     script = (project_root / "scripts" / "finish_backlog_then_all.sh").read_text(
         encoding="utf-8"
     )
     assert '"gpu=1"' in script
+    assert '"gpu_devices=${gpu_device}"' in script
+    assert '"cpu_threads_per_job=${cpu_threads}"' in script
     assert "finish_cpu" not in script
     assert "skullstrip_cpu" not in script
     assert "t1_cpu" not in script
+
+
+@requires_posix_shell
+def test_strict_scheduler_rejects_multiple_visible_gpus(
+    project_root: Path, tmp_path: Path
+) -> None:
+    root = tmp_path / "project"
+    script = root / "scripts" / "finish_backlog_then_all.sh"
+    script.parent.mkdir(parents=True)
+    script.write_text(
+        (project_root / "scripts" / "finish_backlog_then_all.sh").read_text(encoding="utf-8"),
+        encoding="utf-8",
+    )
+    script.chmod(0o755)
+    completed = subprocess.run(
+        [str(script), "96"],
+        cwd=str(root),
+        capture_output=True,
+        text=True,
+        check=False,
+        env={**os.environ, "BACKLOG_LIST_ONLY": "1", "CUDA_VISIBLE_DEVICES": "0,1"},
+    )
+    assert completed.returncode == 2
+    assert "只接受一张GPU编号" in completed.stderr
 
 
 @requires_posix_shell
@@ -163,7 +195,7 @@ def test_backlog_orders_closest_subjects_and_preserves_real_failures(
     completed = _test_scheduler(project_root, root, statuses)
     assert completed.returncode == 0, completed.stdout + completed.stderr
 
-    participants = (root / "logs" / "backlog_participants_v1.0.8.txt").read_text(
+    participants = (root / "logs" / "backlog_participants.txt").read_text(
         encoding="utf-8"
     ).splitlines()
     assert participants == ["E", "B", "C", "A"]

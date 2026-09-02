@@ -21,7 +21,14 @@ class _ImageLike:
 
 def test_physical_grid_corner_tolerance_boundaries() -> None:
     reference = _ImageLike((512, 512, 20), np.eye(4))
-    for displacement, expected in ((0.0026, True), (0.049, True), (0.051, False), (0.5, False)):
+    for displacement, expected in (
+        (0.0026, True),
+        (0.049, True),
+        (0.05, True),
+        (0.05000001, False),
+        (0.051, False),
+        (0.5, False),
+    ):
         shifted = np.eye(4)
         shifted[0, 3] = displacement
         details = physical_grid_diagnostics(reference, _ImageLike(reference.shape, shifted), 0.05)

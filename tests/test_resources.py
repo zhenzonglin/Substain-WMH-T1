@@ -1,8 +1,12 @@
+import os
 from pathlib import Path
+
+import pytest
 
 from substain_features import resources
 
 
+@pytest.mark.skipif(os.name == "nt", reason="Windows未启用开发者模式时不能建立测试符号链接")
 def test_build_manifest_excludes_active_and_failed_environments(tmp_path: Path) -> None:
     """正式资源清单不得依赖已解包环境或失败环境中的临时文件。"""
 

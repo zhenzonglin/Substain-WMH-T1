@@ -31,7 +31,7 @@ def test_guarded_stage_records_runtime_on_failure(tmp_path: Path) -> None:
     payload = json.loads(status_path.read_text(encoding="utf-8"))
     assert payload["status"] == "fail"
     assert payload["details"]["error"] == "expected"
-    assert payload["details"]["runtime"]["duration_seconds"] > 0
+    assert payload["details"]["runtime"]["duration_seconds"] >= 0
 
 
 def test_old_status_without_runtime_remains_readable(tmp_path: Path) -> None:

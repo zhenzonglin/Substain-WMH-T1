@@ -76,36 +76,25 @@ envs/core-venv/bin/substain-features verify-offline \
 `sudo safe_docker.sh`、`safe_docker`和`docker`。无论使用哪个入口，烟雾测试都必须保留
 `--network none --gpus all`。
 
-本次V1.0交付已于2026年8月24日在独立Docker守护进程中以`--network none --gpus all`
+以下是V1.0离线包的历史验证证据，并不等同于V1.1.0-rc1源码标签的当前验证结果。该离线包曾于
+2026年8月24日在独立Docker守护进程中以`--network none --gpus all`
 完成验证。当前wheel仅使用包内资源和`PIP_NO_INDEX=1`恢复三套环境，并通过47项测试、CUDA内核、
 WMH权重、SynthStrip、对侧替代、DLMUSE和GenMIND检查。权威摘要为
 `offline/verification.json`，完整日志为`offline/smoke.log`；摘要记录
 `network_used=false`、`network_isolation=docker_--network_none`和`smoke_test_status=pass`。
 本机示例的T1/FLAIR ID仍带旧`ses01`后缀，而新MNI病灶ID不带该后缀，因此受试者级烟雾测试按
 输入契约记录`subject_smoke_test skipped_no_valid_v1_inputs`，没有将不匹配病例静默拼接。目标工作站
-放入符合V1.0 ID契约的正式数据后，应再次运行上述`--smoke-test`，取得该工作站自己的隔离证据。
+放入符合当前ID契约的正式数据后，应再次运行上述`--smoke-test`，取得该工作站自己的隔离证据。
 
 ## 5. 放入正式数据后运行
 
-### 已安装V1.0工作站更新到V1.0.1
+### V1.1.0-rc1源码与完整离线包的关系
 
-GitHub只传输修正源码和小型项目wheel，不替代工作站内已有的模型、环境归档和Docker镜像。工作站执行：
-
-```bash
-git clone --branch zhenzong/v1.0.1-safe-docker --depth 1 <私人仓库地址> Substain-v1.0.1-hotfix
-cd Substain-v1.0.1-hotfix
-./scripts/apply_v1_0_1_hotfix.sh ~/Substain-v2/Substain
-```
-
-更新脚本仅覆盖固定的热修复文件，先把旧文件备份到目标项目的`archive/hotfix-v1.0.1-backup-*`，
-随后从旧项目已有的离线缓存强制重装项目wheel、重建资源清单并执行完整性检查。它不读取或修改
-`BIDS/`、`Lesion/`及既有分析结果。完成后再运行：
-
-```bash
-cd ~/Substain-v2/Substain
-sudo -v
-./run_pipeline.sh offline-smoke --container-command 'sudo safe_docker.sh'
-```
+GitHub标签`v1.1.0-rc1`只包含可公开到私人源码仓库的代码、配置模板、测试和许可说明。它不包含
+模型、常模、环境归档、原始影像、结果或受限制第三方源码，因此不能直接替代本节描述的完整离线包。
+新项目应按`SOURCE_RELEASE_V1_1_MIGRATION_ZH.md`克隆标签并补齐获授权资源；不要把该标签原位覆盖到
+正在运行的V1.0.x目录。完整离线包只能在已具备全部授权资源的工作站上另行构建，并且wheel版本
+必须与源码的`substain_features.__version__`完全一致。
 
 在目标项目中放入或挂载输入目录，复制并填写`config/metadata.example.tsv`，再按实际数据更新
 `config/config.yaml`的输入模式、根目录和精确后缀。`participants.tsv`由程序自动生成，不手工维护。
@@ -119,7 +108,7 @@ sudo -v
 审计通过后执行：
 
 ```bash
-./run_pipeline.sh all all auto 200
+./run_pipeline.sh run all auto 200
 ```
 
 `all`会完成全部病例特征和四张QC图后退出，不启动人工QC。之后可随时运行

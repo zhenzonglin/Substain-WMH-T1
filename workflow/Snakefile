@@ -17,7 +17,10 @@ if PROFILE == "auto":
 SELECTED = str(config.get("selected_participant", "all"))
 GPU_DEVICES = str(config.get("gpu_devices", ""))
 EXECUTION_CONFIG = config.get("execution", {})
-CPU_HEAVY_THREADS = max(1, int(EXECUTION_CONFIG.get("cpu_threads_per_job", 8)))
+CPU_HEAVY_THREADS = max(
+    1,
+    int(config.get("cpu_threads_per_job", EXECUTION_CONFIG.get("cpu_threads_per_job", 8))),
+)
 
 # 严格完例优先：越接近cleanup的阶段优先级越高。
 # CPU重任务仅由总核心数和threads动态调度；WMH-SynthSeg独占GPU并优先获得新释放的核心。

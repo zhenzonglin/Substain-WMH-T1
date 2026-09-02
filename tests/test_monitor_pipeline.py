@@ -35,7 +35,7 @@ def _status(root: Path, participant: str, stage: str, status: str, timestamp: st
 
 
 def test_progress_counts_running_and_reads_latest_runtime(project_root: Path, tmp_path: Path) -> None:
-    monitor = _load_script(project_root, "monitor_ws1.py")
+    monitor = _load_script(project_root, "monitor_pipeline.py")
     derivatives = tmp_path / "derivatives"
     _status(
         derivatives,
@@ -61,7 +61,7 @@ def test_progress_counts_running_and_reads_latest_runtime(project_root: Path, tm
 
 
 def test_process_argument_parser_recognizes_hyphenated_stage(project_root: Path) -> None:
-    monitor = _load_script(project_root, "monitor_ws1.py")
+    monitor = _load_script(project_root, "monitor_pipeline.py")
     process = monitor.ProcessInfo(
         pid=10,
         ppid=1,

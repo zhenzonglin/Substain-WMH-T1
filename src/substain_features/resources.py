@@ -1,10 +1,9 @@
 """第三方资源版本、SHA256 和离线完整性。"""
 
 import hashlib
-import json
 import subprocess
 from pathlib import Path
-from typing import Dict, Iterable, List, Optional
+from typing import Dict
 
 import pandas as pd
 

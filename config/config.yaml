@@ -1,5 +1,5 @@
 # 相对于本配置文件所在目录解析，离线迁移后无需改写绝对路径。
-project_version: "1.0"
+project_version: "1.1.0-rc1"
 project_root: ..
 participants: config/participants.tsv
 derivatives: derivatives/substain_features
@@ -14,7 +14,7 @@ input:
   lesion_root: Lesion
   t1_suffix: _T1w.nii.gz
   flair_suffix: _FLAIR.nii.gz
-  # V1.0只接受FSL MNI152 1/2 mm二值病灶。
+  # V1.1只接受FSL MNI152 1/2 mm二值病灶。
   lesion_suffix: _space-MNI152_desc-acute_mask.nii.gz
   metadata_tsv: config/metadata.tsv
   bids_links: inputs/bids_links
@@ -59,6 +59,7 @@ t1:
   expanded_age_half_window: 5.0
 execution:
   max_parallel_jobs: 200
+  cpu_threads_per_job: 8
   gpu_policy: auto_one_job_per_device
   gpu_lock_dir: derivatives/substain_features/.gpu-locks
   core_python: envs/core-venv/bin/python

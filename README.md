@@ -1,6 +1,9 @@
-# WMH–T1 40维结构特征工程 V1.0
+# WMH–T1 40维结构特征工程 V1.1.0-rc1
 
 本项目从每例T1、FLAIR和FSL MNI152空间急性卒中二值病灶生成20个WMH特征与20个T1灰质萎缩特征。本阶段只生成特征和QC，不运行SuStaIn。
+
+`v1.1.0-rc1`是完整源码候选版，不需要再应用V1.0.9热修复补丁。新项目迁移步骤见
+[`docs/SOURCE_RELEASE_V1_1_MIGRATION_ZH.md`](docs/SOURCE_RELEASE_V1_1_MIGRATION_ZH.md)。
 
 ## 运行入口
 
@@ -40,6 +43,27 @@ SuStaIn正式输入`features_primary40.tsv`。
 ./run_pipeline.sh offline
 ```
 
+完成`prepare`与`audit`后，也可以把全量计算放到独立进程组：
+
+```bash
+TOTAL_CORES=96 CPU_THREADS_PER_JOB=4 BATCH_SIZE=200 PIPELINE_PROFILE=gpu \
+  CUDA_VISIBLE_DEVICES=0 bash scripts/start_full_run.sh
+```
+
+不设置`TOTAL_CORES`时使用当前机器在线CPU数；不设置`CUDA_VISIBLE_DEVICES`时由`nvidia-smi`发现设备。
+启动脚本不重复执行audit，PID与日志指针写入`logs/full_run.pid`和`logs/full_run.logpath`。
+安全停止时运行`bash scripts/stop_full_run.sh`；脚本校验项目目录、PID和PGID后只发送TERM，不自动KILL。
+
+持续监测可分别在三个终端运行：
+
+```bash
+envs/core-venv/bin/python scripts/monitor_pipeline.py main --interval 30
+envs/core-venv/bin/python scripts/monitor_pipeline.py jobs --interval 30
+envs/core-venv/bin/python scripts/monitor_pipeline.py progress --interval 30
+```
+
+资源历史与阶段耗时分别写入`logs/resource_history.tsv`和`logs/stage_runtime_history.tsv`。
+
 `offline`只检查资源完整性。目标工作站需要通过受控Docker入口执行真正禁网烟雾测试时运行：
 
 ```bash
@@ -50,7 +74,7 @@ SuStaIn正式输入`features_primary40.tsv`。
 `--network none --gpus all`。其他机器可省略`--container-command`，程序会依次尝试
 `sudo safe_docker.sh`、`safe_docker`和`docker`。
 
-默认总任务并发上限为200。`auto`通过`nvidia-smi`检测GPU，并使用进程锁保证每张GPU一次只运行一个WMH-SynthSeg、SynthStrip或DLMUSE任务；没有GPU时自动使用CPU配置。
+默认固定波次为200例。通用全量启动器通过`CUDA_VISIBLE_DEVICES`选择一张GPU，并使用进程锁保证同一时刻只运行一个GPU任务；没有GPU时`auto`使用CPU配置。本RC不包含工作站2的双GPU专用调度。`execution.cpu_threads_per_job`控制每个CPU重任务线程数，环境变量`CPU_THREADS_PER_JOB`可在单次运行时覆盖它。
 
 ## 输入契约
 
@@ -83,7 +107,7 @@ config/participants.tsv
 ./run_pipeline.sh run all auto 200
 ```
 
-`site_id`是影像采集中心/医院的稳定代码，当前用于追溯和多中心接口，不进入V1.0特征计算公式。
+`site_id`是影像采集中心/医院的稳定代码，当前用于追溯和多中心接口，不进入V1.1特征计算公式。
 
 ### BIDS模式
 
@@ -149,10 +173,10 @@ WMH校正不使用固定病灶膨胀。对侧供体发生急性病灶冲突或�
 - 人工QC：`qc_reviews.sqlite`、`qc_reviews.tsv`
 - 中央图像：`derivatives/substain_features/qc/`
 
-`run`和`all`不会调用`export`。所有病例审核完成前，手动执行的`export`会拒绝生成正式主矩阵。自动处理成功并完成四图生成后，会删除概率图、模板空间临时掩膜、去颅骨强度图、非线性形变场和DLMUSE临时目录；保留最终分割、40维特征、四图、状态、日志、哈希和清理清单。自动处理失败病例保留中间件供诊断。
+`run`和`all`不会调用`export`。所有病例审核完成前，手动执行的`export`会拒绝生成正式主矩阵。自动处理成功并完成四图生成后，会删除概率图、模板空间临时掩膜、去颅骨强度图、非线性形变场和DLMUSE临时目录；保留最终分割、40维特征、四图、状态、日志、哈希和清理清单。自动处理失败病例执行`error_records_only_v1`清理，只保留`status/`和`logs/`作为错误证据。
 
-当前旧示例的病灶仍是个体T1空间，因此V1.0会按新契约拒绝它们；替换为FSL MNI152 1/2 mm二值病灶后再运行。详细函数调用见`docs/PROJECT_CODE_GUIDE_ZH.md`。
+当前旧示例的病灶仍是个体T1空间，因此V1.1会按新契约拒绝它们；替换为FSL MNI152 1/2 mm二值病灶后再运行。详细函数调用见`docs/PROJECT_CODE_GUIDE_ZH.md`。
 
 ## GitHub边界
 
-GitHub私人仓库用于保存V1.0源码、配置模板、测试和小型参考文件。`BIDS/`、`Lesion/`、`archive/`、`derivatives/`、已安装环境、大型模型/常模和受限制第三方源码不提交。GitHub clone不是完整离线运行包；离线工作站仍需使用已授权的项目资源副本。
+GitHub私人仓库用于保存V1.1.0-rc1源码、配置模板、测试、小型参考文件和许可证。`BIDS/`、`Lesion/`、`archive/`、`derivatives/`、已安装环境、大型模型/常模和受限制第三方源码不提交。GitHub tag自动生成的源码压缩包不是完整离线运行包；工作站仍需使用获授权的项目资源副本。
