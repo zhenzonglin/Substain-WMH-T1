@@ -2,10 +2,13 @@ diff --git a/src/substain_features/images.py b/src/substain_features/images.py
 index 2926814..f1a1b5a 100644
 --- a/src/substain_features/images.py
 +++ b/src/substain_features/images.py
-@@ -34,6 +34,70 @@ def same_grid(first: Path, second: Path, atol: float = 1e-4) -> bool:
-     return a.shape[:3] == b.shape[:3] and bool(np.allclose(a.affine, b.affine, atol=atol))
- 
- 
+@@ -32,5 +32,69 @@ def same_grid(first: Path, second: Path, atol: float = 1e-4) -> bool:
+     a = nib.load(str(first))
+     b = nib.load(str(second))
+-    return a.shape[:3] == b.shape[:3] and bool(np.allclose(a.affine, b.affine, atol=atol))
++    return a.shape[:3] == b.shape[:3] and bool(np.allclose(a.affine, b.affine, atol=atol))
++
++
 +def physical_grid_diagnostics(
 +    first: nib.spatialimages.SpatialImage,
 +    second: nib.spatialimages.SpatialImage,
@@ -68,10 +71,7 @@ index 2926814..f1a1b5a 100644
 +        "threshold_mm": float(max_corner_displacement_mm),
 +        "matches": matches,
 +    }
-+
-+
- def world_bounds(path: Path) -> np.ndarray:
-     """计算 NIfTI 8 个角点的轴对齐世界坐标包围盒。"""
+ 
  
 diff --git a/src/substain_features/pipeline.py b/src/substain_features/pipeline.py
 index 630c4e1..d0cf85b 100644
