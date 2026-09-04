@@ -1,0 +1,448 @@
+From 56fb2e76a24ddda04b16252f20a69b8cce0c486a Mon Sep 17 00:00:00 2001
+From: zhenzonglin <linzhenzong1@163.com>
+Date: Fri, 4 Sep 2026 11:57:40 +0800
+Subject: [PATCH] fix(pipeline): keep a rolling participant window
+
+---
+ scripts/finish_ws1_v1_0_9.sh | 105 +++++++++++++++++++++--
+ scripts/rolling_admission.py | 159 +++++++++++++++++++++++++++++++++++
+ workflow/Snakefile           |  84 +++++++++++++++++-
+ 3 files changed, 340 insertions(+), 8 deletions(-)
+ create mode 100644 scripts/rolling_admission.py
+
+diff --git a/scripts/finish_ws1_v1_0_9.sh b/scripts/finish_ws1_v1_0_9.sh
+index dd05d8d..864aa64 100755
+--- a/scripts/finish_ws1_v1_0_9.sh
++++ b/scripts/finish_ws1_v1_0_9.sh
+@@ -70,9 +70,33 @@ def cleanup_target(participant_id):
+ def needs_run(participant_id):
+     return not cleanup_target(participant_id).is_file()
+ 
+-representatives = [value for value in representatives if needs_run(value)]
+-grid_rest = [value for value in grid if value not in representatives and needs_run(value)]
+-interrupted = [value for value in interrupted if needs_run(value)]
++stage_order = ("skullstrip", "wmh_seg", "registration", "lesion", "wmh", "t1", "qc")
++
++def progress_key(participant_id):
++    status_dir = derivatives / "sub-{}".format(participant_id) / "status"
++    completed = []
++    for index, stage in enumerate(stage_order):
++        path = status_dir / "{}.json".format(stage)
++        if not path.is_file():
++            continue
++        try:
++            payload = json.loads(path.read_text(encoding="utf-8"))
++        except (OSError, json.JSONDecodeError):
++            raise SystemExit("无法解析状态文件: {}".format(path))
++        if payload.get("status") == "pass":
++            completed.append(index)
++    deepest = max(completed, default=-1)
++    return (-deepest, -len(completed), participant_id)
++
++def closest_first(participant_ids):
++    return sorted(participant_ids, key=progress_key)
++
++representatives = closest_first([value for value in representatives if needs_run(value)])
++grid_rest = closest_first([value for value in grid if value not in representatives and needs_run(value)])
++grid_ids = set(grid)
++interrupted = closest_first(
++    [value for value in interrupted if value not in grid_ids and needs_run(value)]
++)
+ priority = set(grid) | set(interrupted)
+ 
+ config = load_config(config_path)
+@@ -101,11 +125,20 @@ for participant in all_participants:
+     else:
+         untouched.append(participant_id)
+ 
++untouched = closest_first(untouched)
++rolling = []
++seen = set()
++for participant_id in grid_rest + interrupted + untouched:
++    if participant_id not in seen:
++        rolling.append(participant_id)
++        seen.add(participant_id)
++
+ phases = {
+     "representative": representatives,
+     "grid": grid_rest,
+     "interrupted": interrupted,
+     "untouched": untouched,
++    "rolling": rolling,
+ }
+ for name, participant_ids in phases.items():
+     (plan_dir / "{}.targets".format(name)).write_text(
+@@ -121,6 +154,7 @@ for name, participant_ids in phases.items():
+ print("优先队列: representatives={}, grid={}, interrupted={}, untouched={}, historical_failures_skipped={}".format(
+     len(representatives), len(grid_rest), len(interrupted), len(untouched), len(skipped_historical_failures)
+ ))
++print("滚动队列: total={}, order=grid->interrupted->untouched, closest_stage_first=true".format(len(rolling)))
+ PY
+ 
+ run_wave() {
+@@ -176,6 +210,65 @@ run_phase() {
+   done
+ }
+ 
++run_rolling() {
++  local targets_file="$1"
++  local participants_file="$2"
++  local window="$3"
++  local targets=()
++  local participants=()
++  mapfile -t targets < "${targets_file}"
++  mapfile -t participants < "${participants_file}"
++  if (( ${#targets[@]} != ${#participants[@]} )); then
++    echo "滚动队列targets与participants数量不一致" >&2
++    return 2
++  fi
++  if (( ${#targets[@]} == 0 )); then
++    echo "滚动队列为空，无需启动。"
++    return 0
++  fi
++
++  local run_tag token_dir completion_target missing target
++  run_tag="$(date +%Y%m%d_%H%M%S)-$$"
++  token_dir="${plan_dir}/admission-${run_tag}"
++  "${core_python}" "${root}/scripts/rolling_admission.py" initialize \
++    --order-file "${participants_file}" \
++    --token-dir "${token_dir}" \
++    --window "${window}"
++  completion_target="${token_dir}/all_complete.json"
++
++  echo "[$(date -Is)] 启动滚动队列: total=${#targets[@]}, window=${window}, cores=${cores}, gpu=1"
++  PYTHONPATH="${root}/src" "${core_python}" -m snakemake \
++    --snakefile "${snakefile}" \
++    --configfile "${config}" \
++    --cores "${cores}" \
++    --keep-going \
++    --printshellcmds \
++    "${completion_target}" \
++    --resources "gpu=1" \
++    --config \
++      "active_config_file=${config}" \
++      "selected_participant=all" \
++      "profile=gpu" \
++      "gpu_devices=0" \
++      "rolling_order_file=${participants_file}" \
++      "rolling_token_dir=${token_dir}" \
++      "rolling_window=${window}" \
++      "rolling_poll_seconds=10"
++
++  missing=0
++  for target in "${targets[@]}"; do
++    if [[ ! -f "${target}" ]]; then
++      echo "滚动队列结束但缺少cleanup状态: ${target}" >&2
++      missing=$((missing + 1))
++    fi
++  done
++  if (( missing > 0 )); then
++    echo "滚动队列缺少${missing}例cleanup状态。" >&2
++    return 1
++  fi
++  echo "[$(date -Is)] 滚动队列完成: ${#targets[@]}例"
++}
++
+ echo "正式资源: cores=${cores}, threads_per_job=${cpu_threads}, batch_size=${batch_size}, gpu=${CUDA_VISIBLE_DEVICES}"
+ run_phase "代表病例" "${plan_dir}/representative.targets" 3
+ 
+@@ -206,10 +299,8 @@ for participant_id in participants_file.read_text(encoding="utf-8").splitlines()
+ print("代表病例验收通过")
+ PY
+ 
+-run_phase "WMH网格失败" "${plan_dir}/grid.targets" "${batch_size}"
+-run_phase "TERM中断" "${plan_dir}/interrupted.targets" "${batch_size}"
+-run_phase "未处理" "${plan_dir}/untouched.targets" "${batch_size}"
++run_rolling "${plan_dir}/rolling.targets" "${plan_dir}/rolling.participants" "${batch_size}"
+ 
+-echo "[$(date -Is)] 所有波次已产生cleanup状态，执行一次最终聚合；未运行audit。"
++echo "[$(date -Is)] 滚动队列已全部产生cleanup状态，执行一次最终聚合；未运行audit。"
+ PYTHONPATH="${root}/src" "${core_python}" -m substain_features.cli stage aggregate \
+   --config-file "${config}" --participant-id all
+diff --git a/scripts/rolling_admission.py b/scripts/rolling_admission.py
+new file mode 100644
+index 0000000..e501b32
+--- /dev/null
++++ b/scripts/rolling_admission.py
+@@ -0,0 +1,159 @@
++#!/usr/bin/env python3
++"""Keep a bounded rolling window of admitted pipeline participants."""
++
++from __future__ import annotations
++
++import argparse
++import json
++import os
++import re
++import sys
++import time
++from datetime import datetime, timezone
++from pathlib import Path
++
++
++VALID_PARTICIPANT = re.compile(r"^[A-Za-z0-9._-]+$")
++
++
++def _positive_int(value: str) -> int:
++    parsed = int(value)
++    if parsed < 1:
++        raise argparse.ArgumentTypeError("必须为正整数")
++    return parsed
++
++
++def _nonnegative_float(value: str) -> float:
++    parsed = float(value)
++    if parsed < 0:
++        raise argparse.ArgumentTypeError("不能为负数")
++    return parsed
++
++
++def load_order(path: Path) -> list[str]:
++    if not path.is_file() or path.is_symlink():
++        raise ValueError("队列文件不存在或是软链接: {}".format(path))
++    participants = [line.strip() for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
++    if not participants:
++        raise ValueError("滚动队列为空: {}".format(path))
++    invalid = [value for value in participants if not VALID_PARTICIPANT.fullmatch(value)]
++    if invalid:
++        raise ValueError("队列含非法participant_id: {}".format(invalid[0]))
++    if len(set(participants)) != len(participants):
++        raise ValueError("滚动队列含重复participant_id")
++    return participants
++
++
++def cleanup_finished(derivatives: Path, participant_id: str) -> bool:
++    path = derivatives / "sub-{}".format(participant_id) / "status" / "cleanup.json"
++    if not path.is_file() or path.is_symlink():
++        return False
++    try:
++        payload = json.loads(path.read_text(encoding="utf-8"))
++    except (OSError, json.JSONDecodeError):
++        return False
++    return payload.get("status") in {"pass", "fail"}
++
++
++def write_token(output: Path, participant_id: str, index: int, window: int) -> None:
++    output.parent.mkdir(parents=True, exist_ok=True)
++    if output.is_symlink() or output.parent.is_symlink():
++        raise ValueError("拒绝向软链接写入放行令牌: {}".format(output))
++    payload = {
++        "participant_id": participant_id,
++        "queue_index": index,
++        "rolling_window": window,
++        "admitted_at": datetime.now(timezone.utc).isoformat(),
++    }
++    temporary = output.with_name(".{}.{}.tmp".format(output.name, os.getpid()))
++    temporary.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
++    os.replace(temporary, output)
++
++
++def initialize(order_file: Path, token_dir: Path, window: int) -> int:
++    participants = load_order(order_file)
++    if token_dir.exists() and token_dir.is_symlink():
++        raise ValueError("令牌目录不能是软链接: {}".format(token_dir))
++    token_dir.mkdir(parents=True, exist_ok=True)
++    admitted = min(window, len(participants))
++    for index, participant_id in enumerate(participants[:admitted]):
++        write_token(token_dir / "{}.json".format(participant_id), participant_id, index, window)
++    print("滚动队列初始化: total={}, window={}, admitted={}".format(len(participants), window, admitted))
++    return 0
++
++
++def wait_for_slot(
++    order_file: Path,
++    derivatives: Path,
++    participant_id: str,
++    output: Path,
++    window: int,
++    poll_seconds: float,
++) -> int:
++    participants = load_order(order_file)
++    if participant_id not in participants:
++        raise ValueError("participant_id不在滚动队列中: {}".format(participant_id))
++    index = participants.index(participant_id)
++    required_finished = max(0, index - window + 1)
++    last_reported = None
++    while True:
++        finished = sum(cleanup_finished(derivatives, value) for value in participants[:index])
++        if finished >= required_finished:
++            write_token(output, participant_id, index, window)
++            print(
++                "放行participant={} index={} finished_prior={} window={}".format(
++                    participant_id, index, finished, window
++                )
++            )
++            return 0
++        state = (finished, required_finished)
++        if state != last_reported:
++            print(
++                "等待滚动名额: participant={} finished_prior={}/{} window={}".format(
++                    participant_id, finished, required_finished, window
++                ),
++                flush=True,
++            )
++            last_reported = state
++        time.sleep(poll_seconds)
++
++
++def build_parser() -> argparse.ArgumentParser:
++    parser = argparse.ArgumentParser(description=__doc__)
++    subparsers = parser.add_subparsers(dest="command", required=True)
++
++    init_parser = subparsers.add_parser("initialize", help="放行滚动窗口中的首批病例")
++    init_parser.add_argument("--order-file", type=Path, required=True)
++    init_parser.add_argument("--token-dir", type=Path, required=True)
++    init_parser.add_argument("--window", type=_positive_int, default=200)
++
++    wait_parser = subparsers.add_parser("wait", help="等待完成数达到阈值后放行一个病例")
++    wait_parser.add_argument("--order-file", type=Path, required=True)
++    wait_parser.add_argument("--derivatives", type=Path, required=True)
++    wait_parser.add_argument("--participant-id", required=True)
++    wait_parser.add_argument("--output", type=Path, required=True)
++    wait_parser.add_argument("--window", type=_positive_int, default=200)
++    wait_parser.add_argument("--poll-seconds", type=_nonnegative_float, default=10.0)
++    return parser
++
++
++def main(argv: list[str] | None = None) -> int:
++    args = build_parser().parse_args(argv)
++    try:
++        if args.command == "initialize":
++            return initialize(args.order_file.resolve(), args.token_dir.resolve(), args.window)
++        return wait_for_slot(
++            args.order_file.resolve(),
++            args.derivatives.resolve(),
++            args.participant_id,
++            args.output.resolve(),
++            args.window,
++            args.poll_seconds,
++        )
++    except (OSError, ValueError) as error:
++        print("error: {}".format(error), file=sys.stderr)
++        return 2
++
++
++if __name__ == "__main__":
++    raise SystemExit(main())
+diff --git a/workflow/Snakefile b/workflow/Snakefile
+index 0dc511f..ddcc0f6 100644
+--- a/workflow/Snakefile
++++ b/workflow/Snakefile
+@@ -18,6 +18,15 @@ SELECTED = str(config.get("selected_participant", "all"))
+ GPU_DEVICES = str(config.get("gpu_devices", ""))
+ EXECUTION_CONFIG = config.get("execution", {})
+ CPU_HEAVY_THREADS = max(1, int(EXECUTION_CONFIG.get("cpu_threads_per_job", 8)))
++ROLLING_ORDER_VALUE = str(config.get("rolling_order_file", "")).strip()
++ROLLING_ENABLED = bool(ROLLING_ORDER_VALUE)
++ROLLING_WINDOW = max(1, int(config.get("rolling_window", 200)))
++ROLLING_POLL_SECONDS = max(0.1, float(config.get("rolling_poll_seconds", 10)))
++ROLLING_ORDER_FILE = Path(ROLLING_ORDER_VALUE).resolve() if ROLLING_ENABLED else None
++ROLLING_TOKEN_DIR = (
++    Path(str(config.get("rolling_token_dir", ""))).resolve() if ROLLING_ENABLED else None
++)
++ROLLING_SCRIPT = ROOT / "scripts" / "rolling_admission.py"
+ 
+ # 严格完例优先：越接近cleanup的阶段优先级越高。
+ # CPU重任务仅由总核心数和threads动态调度；WMH-SynthSeg独占GPU并优先获得新释放的核心。
+@@ -37,6 +46,32 @@ def load_rows():
+ ROWS = load_rows()
+ PARTICIPANTS = [row["participant_id"] for row in ROWS]
+ 
++if ROLLING_ENABLED:
++    if not ROLLING_ORDER_FILE.is_file():
++        raise ValueError("滚动队列文件不存在: {}".format(ROLLING_ORDER_FILE))
++    ROLLING_ORDER = [
++        value.strip()
++        for value in ROLLING_ORDER_FILE.read_text(encoding="utf-8").splitlines()
++        if value.strip()
++    ]
++    if not ROLLING_ORDER or len(ROLLING_ORDER) != len(set(ROLLING_ORDER)):
++        raise ValueError("滚动队列为空或含重复participant_id")
++    unknown = sorted(set(ROLLING_ORDER) - set(PARTICIPANTS))
++    if unknown:
++        raise ValueError("滚动队列含未知participant_id: {}".format(unknown[0]))
++    if not str(config.get("rolling_token_dir", "")).strip():
++        raise ValueError("启用滚动队列时必须提供rolling_token_dir")
++    ROLLING_INDEX = {value: index for index, value in enumerate(ROLLING_ORDER)}
++    ROLLING_TOKEN_PATTERN = str(ROLLING_TOKEN_DIR / "{participant}.json")
++    ROLLING_ADMISSION_INPUT = ancient(ROLLING_TOKEN_PATTERN)
++    ROLLING_COMPLETE = str(ROLLING_TOKEN_DIR / "all_complete.json")
++else:
++    ROLLING_ORDER = []
++    ROLLING_INDEX = {}
++    ROLLING_TOKEN_PATTERN = ""
++    ROLLING_ADMISSION_INPUT = []
++    ROLLING_COMPLETE = ""
++
+ 
+ def input_path(value):
+     path = Path(value)
+@@ -54,6 +89,13 @@ def stage_pattern(stage):
+     return str(DERIVATIVES / "sub-{participant}" / "status" / "{}.json".format(stage))
+ 
+ 
++def rolling_previous_token(wildcards):
++    index = ROLLING_INDEX[wildcards.participant]
++    if index == 0:
++        return []
++    return str(ROLLING_TOKEN_DIR / "{}.json".format(ROLLING_ORDER[index - 1]))
++
++
+ CORE = str(ROOT / config["execution"].get("core_python", "envs/core-venv/bin/python"))
+ WMH_PYTHON = str(ROOT / config["execution"].get("wmh_python", "envs/wmh/bin/python"))
+ T1_PYTHON = str(ROOT / config["execution"].get("t1_python", "envs/t1/bin/python"))
+@@ -98,10 +140,50 @@ rule audit:
+         "PYTHONPATH={ROOT}/src {CORE} -m substain_features.cli audit --config-file {CONFIG_FILE} --participant-id {SELECTED}"
+ 
+ 
++if ROLLING_ENABLED:
++    rule rolling_admission:
++        input:
++            rolling_previous_token
++        output:
++            ROLLING_TOKEN_PATTERN
++        wildcard_constraints:
++            participant="|".join(ROLLING_ORDER)
++        priority: 180
++        resources:
++            gpu=0
++        threads: 1
++        shell:
++            "{CORE} {ROLLING_SCRIPT} wait --order-file {ROLLING_ORDER_FILE} "
++            "--derivatives {DERIVATIVES} --participant-id {wildcards.participant} "
++            "--output {output} --window {ROLLING_WINDOW} "
++            "--poll-seconds {ROLLING_POLL_SECONDS}"
++
++
++    rule rolling_completion:
++        input:
++            [
++                str(DERIVATIVES / "sub-{}".format(participant) / "status" / "cleanup.json")
++                for participant in ROLLING_ORDER
++            ]
++        output:
++            ROLLING_COMPLETE
++        priority: 1
++        resources:
++            gpu=0
++        run:
++            output_path = Path(str(output[0]))
++            output_path.parent.mkdir(parents=True, exist_ok=True)
++            output_path.write_text(
++                "rolling queue complete: {} participants\n".format(len(ROLLING_ORDER)),
++                encoding="utf-8",
++            )
++
++
+ # 02 CPU队列：T1/FLAIR SynthStrip不申请GPU锁，为WMH-SynthSeg独占GPU。
+ rule skullstrip:
+     input:
+-        rules.audit.output
++        audit=rules.audit.output,
++        admission=ROLLING_ADMISSION_INPUT,
+     output:
+         stage_pattern("skullstrip")
+     wildcard_constraints:
+-- 
+2.54.0.windows.1
+
