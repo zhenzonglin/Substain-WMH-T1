@@ -1,0 +1,11 @@
+diff --git a/workflow/Snakefile b/workflow/Snakefile
+--- a/workflow/Snakefile
++++ b/workflow/Snakefile
+@@ -218,6 +218,6 @@ rule wmh_segmentation:
+     priority: 165
+     resources:
+-        gpu=1 if PROFILE == "gpu" else 0,
++        gpu=GPU_SLOTS_PER_DEVICE if PROFILE == "gpu" else 0,
+         wmh_exclusive=1 if PROFILE == "gpu" else 0
+     shell:
+         recorded_subject_failure_allowed(execution_command(WMH_PYTHON, "-m substain_features.cli stage wmh-seg --config-file {} --participant-id {{wildcards.participant}} --profile {}".format(CONFIG_FILE, PROFILE), needs_gpu=True, gpu_slots_required=GPU_SLOTS_PER_DEVICE))

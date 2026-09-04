@@ -8,6 +8,8 @@
 - `deploy_ws1_rolling_window.sh`：停止旧进程、校验现场、应用补丁并重启；
 - `ws1_dual_t1_wmh_exclusive.patch`：GPU0双T1、WMH独占增量补丁；
 - `deploy_ws1_dual_t1.sh`：校验现场、TERM停止、备份、应用双槽补丁并重启；
+- `ws1_gpu_throughput_first.patch`：让WMH请求两个Snakemake GPU令牌，避免等待中的WMH占住第二个T1令牌；
+- `deploy_ws1_gpu_throughput.sh`：从已部署双槽版本切换为吞吐优先并重启；
 - `verify_ws1_gpu_slots.py`：不运行模型的Linux文件锁行为测试；
 - `SHA256SUMS`：文件校验和。
 
@@ -57,6 +59,21 @@ bash deploy_ws1_dual_t1.sh \
 部署脚本要求当前项目已经应用滚动200例补丁，并保留T1 GPU、registration 8线程及cleanup实现。它会先完成补丁上下文检查，再校验PID、PGID、cwd与启动命令；随后只发送TERM。应用前的四个文件保存在`archive/dual-t1-wmh-exclusive-*`。
 
 补丁后的正式资源保持为96个CPU核心、普通任务4线程、registration 8线程、滚动窗口200例。启动日志应包含`gpu_slots=2`和`wmh_exclusive=1`。
+
+## 启用GPU吞吐优先
+
+若监测发现一个T1持有1槽、一个等待中的WMH包装器占用另一个Snakemake令牌，执行下列增量部署。修改后，有可运行T1时可持续填充两个T1令牌；WMH必须同时取得两个Snakemake令牌和两个物理槽，因此仍不会与T1重叠。代价是T1积压期间WMH可能延后。
+
+```bash
+cd /data/usersdir/linzhenzong/Substain-ws1-rolling-patch-lite
+git pull --ff-only
+sha256sum -c SHA256SUMS
+
+bash deploy_ws1_gpu_throughput.sh \
+  /data/usersdir/linzhenzong/Substain
+```
+
+该脚本仅修改活动项目的`workflow/Snakefile`。它先验证双槽版本、PID、PGID、cwd和补丁上下文，再TERM停止；随后备份、应用、解析、解锁并通过原V1.0.9入口重启。失败时不会使用KILL。
 
 继续使用窗口3：
 
