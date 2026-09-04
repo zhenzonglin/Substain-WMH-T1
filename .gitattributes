@@ -1,0 +1,4 @@
+*.md text eol=lf
+*.sh text eol=lf
+*.patch text eol=lf
+SHA256SUMS text eol=lf
