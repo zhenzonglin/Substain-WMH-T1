@@ -30,3 +30,12 @@ bash deploy_ws1_rolling_window.sh \
 部署脚本仅对活动项目中的三个运行文件应用补丁。它不会把此轻量仓库当作完整项目，也不会替换环境、资源、配置或`derivatives/`。
 
 停止旧任务时只发送TERM并等待最多60秒；若仍有残留进程，脚本停止操作，不使用KILL，也不应用补丁。
+
+## 比较旧CPU与新GPU的T1耗时
+
+```bash
+python compare_t1_cpu_gpu_runtime.py \
+  --project-root /data/usersdir/linzhenzong/Substain
+```
+
+工具读取每例`status_history.jsonl`，按`effective_device`分类。主比较只使用成功、完整、未复用、未从DLICV断点恢复的T1运行，并保存明细TSV和汇总JSON到项目`logs/`。
