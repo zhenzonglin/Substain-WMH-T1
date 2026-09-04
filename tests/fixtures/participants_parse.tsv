@@ -1,0 +1,2 @@
+participant_id	age	sex	site_id	t1w	flair	lesion_mask
+EXAMPLE001	60	female	SITE01	pyproject.toml	pyproject.toml	pyproject.toml

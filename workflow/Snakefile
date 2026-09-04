@@ -18,6 +18,15 @@ SELECTED = str(config.get("selected_participant", "all"))
 GPU_DEVICES = str(config.get("gpu_devices", ""))
 EXECUTION_CONFIG = config.get("execution", {})
 CPU_HEAVY_THREADS = max(1, int(EXECUTION_CONFIG.get("cpu_threads_per_job", 8)))
+ROLLING_ORDER_VALUE = str(config.get("rolling_order_file", "")).strip()
+ROLLING_ENABLED = bool(ROLLING_ORDER_VALUE)
+ROLLING_WINDOW = max(1, int(config.get("rolling_window", 200)))
+ROLLING_POLL_SECONDS = max(0.1, float(config.get("rolling_poll_seconds", 10)))
+ROLLING_ORDER_FILE = Path(ROLLING_ORDER_VALUE).resolve() if ROLLING_ENABLED else None
+ROLLING_TOKEN_DIR = (
+    Path(str(config.get("rolling_token_dir", ""))).resolve() if ROLLING_ENABLED else None
+)
+ROLLING_SCRIPT = ROOT / "scripts" / "rolling_admission.py"
 
 # 严格完例优先：越接近cleanup的阶段优先级越高。
 # CPU重任务仅由总核心数和threads动态调度；WMH-SynthSeg独占GPU并优先获得新释放的核心。
@@ -37,6 +46,32 @@ def load_rows():
 ROWS = load_rows()
 PARTICIPANTS = [row["participant_id"] for row in ROWS]
 
+if ROLLING_ENABLED:
+    if not ROLLING_ORDER_FILE.is_file():
+        raise ValueError("滚动队列文件不存在: {}".format(ROLLING_ORDER_FILE))
+    ROLLING_ORDER = [
+        value.strip()
+        for value in ROLLING_ORDER_FILE.read_text(encoding="utf-8").splitlines()
+        if value.strip()
+    ]
+    if not ROLLING_ORDER or len(ROLLING_ORDER) != len(set(ROLLING_ORDER)):
+        raise ValueError("滚动队列为空或含重复participant_id")
+    unknown = sorted(set(ROLLING_ORDER) - set(PARTICIPANTS))
+    if unknown:
+        raise ValueError("滚动队列含未知participant_id: {}".format(unknown[0]))
+    if not str(config.get("rolling_token_dir", "")).strip():
+        raise ValueError("启用滚动队列时必须提供rolling_token_dir")
+    ROLLING_INDEX = {value: index for index, value in enumerate(ROLLING_ORDER)}
+    ROLLING_TOKEN_PATTERN = str(ROLLING_TOKEN_DIR / "{participant}.json")
+    ROLLING_ADMISSION_INPUT = ancient(ROLLING_TOKEN_PATTERN)
+    ROLLING_COMPLETE = str(ROLLING_TOKEN_DIR / "all_complete.json")
+else:
+    ROLLING_ORDER = []
+    ROLLING_INDEX = {}
+    ROLLING_TOKEN_PATTERN = ""
+    ROLLING_ADMISSION_INPUT = []
+    ROLLING_COMPLETE = ""
+
 
 def input_path(value):
     path = Path(value)
@@ -52,6 +87,13 @@ PARTICIPANT_INPUTS = [
 
 def stage_pattern(stage):
     return str(DERIVATIVES / "sub-{participant}" / "status" / "{}.json".format(stage))
+
+
+def rolling_previous_token(wildcards):
+    index = ROLLING_INDEX[wildcards.participant]
+    if index == 0:
+        return []
+    return str(ROLLING_TOKEN_DIR / "{}.json".format(ROLLING_ORDER[index - 1]))
 
 
 CORE = str(ROOT / config["execution"].get("core_python", "envs/core-venv/bin/python"))
@@ -98,10 +140,50 @@ rule audit:
         "PYTHONPATH={ROOT}/src {CORE} -m substain_features.cli audit --config-file {CONFIG_FILE} --participant-id {SELECTED}"
 
 
+if ROLLING_ENABLED:
+    rule rolling_admission:
+        input:
+            rolling_previous_token
+        output:
+            ROLLING_TOKEN_PATTERN
+        wildcard_constraints:
+            participant="|".join(ROLLING_ORDER)
+        priority: 180
+        resources:
+            gpu=0
+        threads: 1
+        shell:
+            "{CORE} {ROLLING_SCRIPT} wait --order-file {ROLLING_ORDER_FILE} "
+            "--derivatives {DERIVATIVES} --participant-id {wildcards.participant} "
+            "--output {output} --window {ROLLING_WINDOW} "
+            "--poll-seconds {ROLLING_POLL_SECONDS}"
+
+
+    rule rolling_completion:
+        input:
+            [
+                str(DERIVATIVES / "sub-{}".format(participant) / "status" / "cleanup.json")
+                for participant in ROLLING_ORDER
+            ]
+        output:
+            ROLLING_COMPLETE
+        priority: 1
+        resources:
+            gpu=0
+        run:
+            output_path = Path(str(output[0]))
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+            output_path.write_text(
+                "rolling queue complete: {} participants\n".format(len(ROLLING_ORDER)),
+                encoding="utf-8",
+            )
+
+
 # 02 CPU队列：T1/FLAIR SynthStrip不申请GPU锁，为WMH-SynthSeg独占GPU。
 rule skullstrip:
     input:
-        rules.audit.output
+        audit=rules.audit.output,
+        admission=ROLLING_ADMISSION_INPUT,
     output:
         stage_pattern("skullstrip")
     wildcard_constraints:

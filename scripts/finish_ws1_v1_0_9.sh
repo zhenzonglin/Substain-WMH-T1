@@ -70,9 +70,33 @@ def cleanup_target(participant_id):
 def needs_run(participant_id):
     return not cleanup_target(participant_id).is_file()
 
-representatives = [value for value in representatives if needs_run(value)]
-grid_rest = [value for value in grid if value not in representatives and needs_run(value)]
-interrupted = [value for value in interrupted if needs_run(value)]
+stage_order = ("skullstrip", "wmh_seg", "registration", "lesion", "wmh", "t1", "qc")
+
+def progress_key(participant_id):
+    status_dir = derivatives / "sub-{}".format(participant_id) / "status"
+    completed = []
+    for index, stage in enumerate(stage_order):
+        path = status_dir / "{}.json".format(stage)
+        if not path.is_file():
+            continue
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            raise SystemExit("无法解析状态文件: {}".format(path))
+        if payload.get("status") == "pass":
+            completed.append(index)
+    deepest = max(completed, default=-1)
+    return (-deepest, -len(completed), participant_id)
+
+def closest_first(participant_ids):
+    return sorted(participant_ids, key=progress_key)
+
+representatives = closest_first([value for value in representatives if needs_run(value)])
+grid_rest = closest_first([value for value in grid if value not in representatives and needs_run(value)])
+grid_ids = set(grid)
+interrupted = closest_first(
+    [value for value in interrupted if value not in grid_ids and needs_run(value)]
+)
 priority = set(grid) | set(interrupted)
 
 config = load_config(config_path)
@@ -101,11 +125,20 @@ for participant in all_participants:
     else:
         untouched.append(participant_id)
 
+untouched = closest_first(untouched)
+rolling = []
+seen = set()
+for participant_id in grid_rest + interrupted + untouched:
+    if participant_id not in seen:
+        rolling.append(participant_id)
+        seen.add(participant_id)
+
 phases = {
     "representative": representatives,
     "grid": grid_rest,
     "interrupted": interrupted,
     "untouched": untouched,
+    "rolling": rolling,
 }
 for name, participant_ids in phases.items():
     (plan_dir / "{}.targets".format(name)).write_text(
@@ -121,6 +154,7 @@ for name, participant_ids in phases.items():
 print("优先队列: representatives={}, grid={}, interrupted={}, untouched={}, historical_failures_skipped={}".format(
     len(representatives), len(grid_rest), len(interrupted), len(untouched), len(skipped_historical_failures)
 ))
+print("滚动队列: total={}, order=grid->interrupted->untouched, closest_stage_first=true".format(len(rolling)))
 PY
 
 run_wave() {
@@ -176,6 +210,65 @@ run_phase() {
   done
 }
 
+run_rolling() {
+  local targets_file="$1"
+  local participants_file="$2"
+  local window="$3"
+  local targets=()
+  local participants=()
+  mapfile -t targets < "${targets_file}"
+  mapfile -t participants < "${participants_file}"
+  if (( ${#targets[@]} != ${#participants[@]} )); then
+    echo "滚动队列targets与participants数量不一致" >&2
+    return 2
+  fi
+  if (( ${#targets[@]} == 0 )); then
+    echo "滚动队列为空，无需启动。"
+    return 0
+  fi
+
+  local run_tag token_dir completion_target missing target
+  run_tag="$(date +%Y%m%d_%H%M%S)-$$"
+  token_dir="${plan_dir}/admission-${run_tag}"
+  "${core_python}" "${root}/scripts/rolling_admission.py" initialize \
+    --order-file "${participants_file}" \
+    --token-dir "${token_dir}" \
+    --window "${window}"
+  completion_target="${token_dir}/all_complete.json"
+
+  echo "[$(date -Is)] 启动滚动队列: total=${#targets[@]}, window=${window}, cores=${cores}, gpu=1"
+  PYTHONPATH="${root}/src" "${core_python}" -m snakemake \
+    --snakefile "${snakefile}" \
+    --configfile "${config}" \
+    --cores "${cores}" \
+    --keep-going \
+    --printshellcmds \
+    "${completion_target}" \
+    --resources "gpu=1" \
+    --config \
+      "active_config_file=${config}" \
+      "selected_participant=all" \
+      "profile=gpu" \
+      "gpu_devices=0" \
+      "rolling_order_file=${participants_file}" \
+      "rolling_token_dir=${token_dir}" \
+      "rolling_window=${window}" \
+      "rolling_poll_seconds=10"
+
+  missing=0
+  for target in "${targets[@]}"; do
+    if [[ ! -f "${target}" ]]; then
+      echo "滚动队列结束但缺少cleanup状态: ${target}" >&2
+      missing=$((missing + 1))
+    fi
+  done
+  if (( missing > 0 )); then
+    echo "滚动队列缺少${missing}例cleanup状态。" >&2
+    return 1
+  fi
+  echo "[$(date -Is)] 滚动队列完成: ${#targets[@]}例"
+}
+
 echo "正式资源: cores=${cores}, threads_per_job=${cpu_threads}, batch_size=${batch_size}, gpu=${CUDA_VISIBLE_DEVICES}"
 run_phase "代表病例" "${plan_dir}/representative.targets" 3
 
@@ -206,10 +299,8 @@ for participant_id in participants_file.read_text(encoding="utf-8").splitlines()
 print("代表病例验收通过")
 PY
 
-run_phase "WMH网格失败" "${plan_dir}/grid.targets" "${batch_size}"
-run_phase "TERM中断" "${plan_dir}/interrupted.targets" "${batch_size}"
-run_phase "未处理" "${plan_dir}/untouched.targets" "${batch_size}"
+run_rolling "${plan_dir}/rolling.targets" "${plan_dir}/rolling.participants" "${batch_size}"
 
-echo "[$(date -Is)] 所有波次已产生cleanup状态，执行一次最终聚合；未运行audit。"
+echo "[$(date -Is)] 滚动队列已全部产生cleanup状态，执行一次最终聚合；未运行audit。"
 PYTHONPATH="${root}/src" "${core_python}" -m substain_features.cli stage aggregate \
   --config-file "${config}" --participant-id all
