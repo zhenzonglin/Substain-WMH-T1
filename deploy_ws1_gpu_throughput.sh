@@ -23,13 +23,13 @@ if [[ "${root}" != "/data/usersdir/linzhenzong/Substain" ]]; then
   exit 2
 fi
 for required in "${patch_file}" "${checksum_file}" "${snakefile}" \
-  "${start_script}" "${core_python}" "${config}"; do
+  "${start_script}" "${config}"; do
   if [[ ! -e "${required}" || -L "${required}" ]]; then
     echo "必需文件不存在或是软链接: ${required}" >&2
     exit 2
   fi
 done
-if [[ ! -x "${core_python}" || ! -x "${start_script}" ]]; then
+if [[ ! -f "${core_python}" || ! -x "${core_python}" || ! -x "${start_script}" ]]; then
   echo "项目Python或启动脚本不可执行" >&2
   exit 2
 fi
