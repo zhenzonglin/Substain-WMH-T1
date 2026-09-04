@@ -1,0 +1,291 @@
+diff --git a/scripts/finish_ws1_v1_0_9.sh b/scripts/finish_ws1_v1_0_9.sh
+index 864aa64..6391e66 100644
+--- a/scripts/finish_ws1_v1_0_9.sh
++++ b/scripts/finish_ws1_v1_0_9.sh
+@@ -5,6 +5,7 @@ root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
+ cores="${1:-96}"
+ cpu_threads="${CPU_THREADS_PER_JOB:-4}"
+ batch_size="${BATCH_SIZE:-200}"
++gpu_slots=2
+ manifest_pointer="${root}/logs/ws1_v1.0.9_rerun_manifest.path"
+ config="${root}/config/config.yaml"
+ core_python="${root}/envs/core-venv/bin/python"
+@@ -12,7 +13,7 @@ snakefile="${root}/workflow/Snakefile"
+ derivatives="${root}/derivatives/substain_features"
+ plan_dir="${root}/logs/ws1_v1.0.9_queue"
+ 
+-for value_name in cores cpu_threads batch_size; do
++for value_name in cores cpu_threads batch_size gpu_slots; do
+   value="${!value_name}"
+   if [[ ! "${value}" =~ ^[1-9][0-9]*$ ]]; then
+     echo "${value_name}必须为正整数: ${value}" >&2
+@@ -173,12 +174,13 @@ run_wave() {
+     --keep-going \
+     --printshellcmds \
+     "${targets[@]}" \
+-    --resources "gpu=1" \
++    --resources "gpu=${gpu_slots}" "wmh_exclusive=1" \
+     --config \
+       "active_config_file=${config}" \
+       "selected_participant=all" \
+       "profile=gpu" \
+-      "gpu_devices=0"
++      "gpu_devices=0" \
++      "gpu_slots_per_device=${gpu_slots}"
+   for target in "${targets[@]}"; do
+     if [[ ! -f "${target}" ]]; then
+       echo "波次结束但缺少cleanup状态: ${target}" >&2
+@@ -236,7 +238,7 @@ run_rolling() {
+     --window "${window}"
+   completion_target="${token_dir}/all_complete.json"
+ 
+-  echo "[$(date -Is)] 启动滚动队列: total=${#targets[@]}, window=${window}, cores=${cores}, gpu=1"
++  echo "[$(date -Is)] 启动滚动队列: total=${#targets[@]}, window=${window}, cores=${cores}, gpu_slots=${gpu_slots}"
+   PYTHONPATH="${root}/src" "${core_python}" -m snakemake \
+     --snakefile "${snakefile}" \
+     --configfile "${config}" \
+@@ -244,12 +246,13 @@ run_rolling() {
+     --keep-going \
+     --printshellcmds \
+     "${completion_target}" \
+-    --resources "gpu=1" \
++    --resources "gpu=${gpu_slots}" "wmh_exclusive=1" \
+     --config \
+       "active_config_file=${config}" \
+       "selected_participant=all" \
+       "profile=gpu" \
+       "gpu_devices=0" \
++      "gpu_slots_per_device=${gpu_slots}" \
+       "rolling_order_file=${participants_file}" \
+       "rolling_token_dir=${token_dir}" \
+       "rolling_window=${window}" \
+@@ -269,7 +272,7 @@ run_rolling() {
+   echo "[$(date -Is)] 滚动队列完成: ${#targets[@]}例"
+ }
+ 
+-echo "正式资源: cores=${cores}, threads_per_job=${cpu_threads}, batch_size=${batch_size}, gpu=${CUDA_VISIBLE_DEVICES}"
++echo "正式资源: cores=${cores}, threads_per_job=${cpu_threads}, batch_size=${batch_size}, gpu=${CUDA_VISIBLE_DEVICES}, gpu_slots=${gpu_slots}, wmh_exclusive=1"
+ run_phase "代表病例" "${plan_dir}/representative.targets" 3
+ 
+ PYTHONPATH="${root}/src" "${core_python}" - "${plan_dir}/representative.participants" "${derivatives}" <<'PY'
+diff --git a/scripts/start_ws1_v1_0_9.sh b/scripts/start_ws1_v1_0_9.sh
+index fbf8b35..b44ea7e 100644
+--- a/scripts/start_ws1_v1_0_9.sh
++++ b/scripts/start_ws1_v1_0_9.sh
+@@ -25,6 +25,7 @@ setsid nohup env \
+   CPU_THREADS_PER_JOB=4 \
+   BATCH_SIZE=200 \
+   CUDA_VISIBLE_DEVICES=0 \
++  GPU_SLOTS_PER_DEVICE=2 \
+   bash "${root}/scripts/finish_ws1_v1_0_9.sh" 96 \
+   >"${run_log}" 2>&1 < /dev/null &
+ run_pid=$!
+diff --git a/src/substain_features/gpu_pool.py b/src/substain_features/gpu_pool.py
+index bbf019c..7a492bf 100644
+--- a/src/substain_features/gpu_pool.py
++++ b/src/substain_features/gpu_pool.py
+@@ -1,4 +1,4 @@
+-"""本地多GPU独占调度：每个GPU阶段一次只占用一张卡。"""
++"""本地GPU槽位调度：共享T1槽位，同时支持WMH独占整张卡。"""
+ 
+ from __future__ import annotations
+ 
+@@ -8,7 +8,7 @@ import os
+ import subprocess
+ import time
+ from pathlib import Path
+-from typing import List, Mapping, Optional, Sequence
++from typing import IO, List, Mapping, Optional, Sequence
+ 
+ 
+ def detect_gpu_ids(environment: Optional[Mapping[str, str]] = None) -> List[str]:
+@@ -33,45 +33,99 @@ def detect_gpu_ids(environment: Optional[Mapping[str, str]] = None) -> List[str]
+     return [line.strip() for line in completed.stdout.splitlines() if line.strip()]
+ 
+ 
+-def run_with_gpu_lock(command: Sequence[str], gpu_ids: Sequence[str], lock_dir: Path) -> int:
+-    """等待任一GPU锁，持锁运行子进程并设置独立CUDA_VISIBLE_DEVICES。"""
++def _lock_path(lock_dir: Path, gpu_id: str, slot_index: int, slots_per_gpu: int) -> Path:
++    if slots_per_gpu == 1:
++        return lock_dir / "gpu-{}.lock".format(gpu_id)
++    return lock_dir / "gpu-{}-slot-{}.lock".format(gpu_id, slot_index)
++
++
++def _release_locks(handles: Sequence[IO[str]]) -> None:
++    for handle in reversed(handles):
++        fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
++        handle.close()
++
++
++def _try_acquire_slots(
++    gpu_id: str,
++    lock_dir: Path,
++    slots_per_gpu: int,
++    slots_required: int,
++) -> List[IO[str]]:
++    lock_dir.mkdir(parents=True, exist_ok=True)
++    handles: List[IO[str]] = []
++    for slot_index in range(slots_per_gpu):
++        handle = _lock_path(lock_dir, gpu_id, slot_index, slots_per_gpu).open(
++            "a+", encoding="utf-8"
++        )
++        try:
++            fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
++        except BlockingIOError:
++            handle.close()
++            continue
++        handles.append(handle)
++        if len(handles) == slots_required:
++            return handles
++    _release_locks(handles)
++    return []
++
++
++def run_with_gpu_lock(
++    command: Sequence[str],
++    gpu_ids: Sequence[str],
++    lock_dir: Path,
++    slots_per_gpu: int = 1,
++    slots_required: int = 1,
++) -> int:
++    """等待任一GPU的所需槽位，持锁运行子进程并设置可见设备。"""
+ 
+     if not command:
+         raise ValueError("GPU包装器缺少待执行命令")
+     if not gpu_ids:
+         raise RuntimeError("GPU配置已启用，但没有可分配GPU")
++    if slots_per_gpu < 1:
++        raise ValueError("每张GPU的槽位数必须为正整数")
++    if slots_required < 1 or slots_required > slots_per_gpu:
++        raise ValueError("任务所需GPU槽位必须位于1到每卡槽位数之间")
+     lock_dir.mkdir(parents=True, exist_ok=True)
+     while True:
+         for gpu_id in gpu_ids:
+-            lock_path = lock_dir / "gpu-{}.lock".format(gpu_id)
+-            handle = lock_path.open("a+", encoding="utf-8")
+-            try:
+-                fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+-            except BlockingIOError:
+-                handle.close()
++            handles = _try_acquire_slots(
++                str(gpu_id), lock_dir, slots_per_gpu, slots_required
++            )
++            if not handles:
+                 continue
+             try:
+                 environment = os.environ.copy()
+                 environment["CUDA_VISIBLE_DEVICES"] = str(gpu_id)
+                 environment["SUBSTAIN_ASSIGNED_GPU"] = str(gpu_id)
++                environment["SUBSTAIN_ASSIGNED_GPU_SLOTS"] = str(slots_required)
+                 completed = subprocess.run(list(command), env=environment, check=False)
+                 return int(completed.returncode)
+             finally:
+-                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+-                handle.close()
++                _release_locks(handles)
+         time.sleep(0.25)
+ 
+ 
+ def main() -> None:
+-    parser = argparse.ArgumentParser(description="为一个GPU任务分配独占设备")
++    parser = argparse.ArgumentParser(description="为GPU任务分配共享或独占槽位")
+     parser.add_argument("--gpu-ids", required=True, help="逗号分隔的设备编号")
+     parser.add_argument("--lock-dir", type=Path, required=True)
++    parser.add_argument("--slots-per-gpu", type=int, default=1)
++    parser.add_argument("--slots-required", type=int, default=1)
+     parser.add_argument("command", nargs=argparse.REMAINDER)
+     args = parser.parse_args()
+     command = list(args.command)
+     if command and command[0] == "--":
+         command = command[1:]
+-    raise SystemExit(run_with_gpu_lock(command, [item for item in args.gpu_ids.split(",") if item], args.lock_dir))
++    raise SystemExit(
++        run_with_gpu_lock(
++            command,
++            [item for item in args.gpu_ids.split(",") if item],
++            args.lock_dir,
++            slots_per_gpu=args.slots_per_gpu,
++            slots_required=args.slots_required,
++        )
++    )
+ 
+ 
+ if __name__ == "__main__":
+diff --git a/workflow/Snakefile b/workflow/Snakefile
+index 9bb98f4..fa2a23c 100644
+--- a/workflow/Snakefile
++++ b/workflow/Snakefile
+@@ -16,6 +16,7 @@ if PROFILE == "auto":
+ # Snakemake会把纯数字命令行配置值解析成int；参与者ID一律按字符串匹配。
+ SELECTED = str(config.get("selected_participant", "all"))
+ GPU_DEVICES = str(config.get("gpu_devices", ""))
++GPU_SLOTS_PER_DEVICE = max(1, int(config.get("gpu_slots_per_device", 1)))
+ EXECUTION_CONFIG = config.get("execution", {})
+ CPU_HEAVY_THREADS = max(1, int(EXECUTION_CONFIG.get("cpu_threads_per_job", 8)))
+ ROLLING_ORDER_VALUE = str(config.get("rolling_order_file", "")).strip()
+@@ -100,16 +101,26 @@ CORE = str(ROOT / config["execution"].get("core_python", "envs/core-venv/bin/pyt
+ WMH_PYTHON = str(ROOT / config["execution"].get("wmh_python", "envs/wmh/bin/python"))
+ T1_PYTHON = str(ROOT / config["execution"].get("t1_python", "envs/t1/bin/python"))
+ GPU_LOCK_DIR = str(ROOT / config["execution"].get("gpu_lock_dir", "derivatives/substain_features/.gpu-locks"))
+-GPU_PREFIX = (
+-    "PYTHONPATH={root}/src {core} -m substain_features.gpu_pool --gpu-ids {devices} "
+-    "--lock-dir {locks} -- /usr/bin/env PYTHONPATH={root}/src "
+-).format(root=ROOT, core=CORE, devices=GPU_DEVICES, locks=GPU_LOCK_DIR)
+-
+-
+-def execution_command(python, command, needs_gpu=False):
++def gpu_prefix(slots_required):
++    return (
++        "PYTHONPATH={root}/src {core} -m substain_features.gpu_pool "
++        "--gpu-ids {devices} --lock-dir {locks} "
++        "--slots-per-gpu {slots_per_gpu} --slots-required {slots_required} "
++        "-- /usr/bin/env PYTHONPATH={root}/src "
++    ).format(
++        root=ROOT,
++        core=CORE,
++        devices=GPU_DEVICES,
++        locks=GPU_LOCK_DIR,
++        slots_per_gpu=GPU_SLOTS_PER_DEVICE,
++        slots_required=slots_required,
++    )
++
++
++def execution_command(python, command, needs_gpu=False, gpu_slots_required=1):
+     direct = "PYTHONPATH={}/src {} {}".format(ROOT, python, command)
+     if PROFILE == "gpu" and needs_gpu:
+-        return GPU_PREFIX + "{} {}".format(python, command)
++        return gpu_prefix(gpu_slots_required) + "{} {}".format(python, command)
+     return direct
+ 
+ 
+@@ -196,7 +207,7 @@ rule skullstrip:
+         recorded_subject_failure_allowed(execution_command(CORE, "-m substain_features.cli stage skullstrip --config-file {} --participant-id {{wildcards.participant}} --profile cpu".format(CONFIG_FILE), needs_gpu=False))
+ 
+ 
+-# 03 唯一GPU队列：SynthStrip完成后即可进行WMH-SynthSeg，无需等待CPU配准。
++# 03 WMH-SynthSeg占满全部GPU槽位，不能与T1并行。
+ rule wmh_segmentation:
+     input:
+         stage_pattern("skullstrip")
+@@ -206,9 +217,10 @@ rule wmh_segmentation:
+         participant="|".join(PARTICIPANTS)
+     priority: 165
+     resources:
+-        gpu=1 if PROFILE == "gpu" else 0
++        gpu=1 if PROFILE == "gpu" else 0,
++        wmh_exclusive=1 if PROFILE == "gpu" else 0
+     shell:
+-        recorded_subject_failure_allowed(execution_command(WMH_PYTHON, "-m substain_features.cli stage wmh-seg --config-file {} --participant-id {{wildcards.participant}} --profile {}".format(CONFIG_FILE, PROFILE), needs_gpu=True))
++        recorded_subject_failure_allowed(execution_command(WMH_PYTHON, "-m substain_features.cli stage wmh-seg --config-file {} --participant-id {{wildcards.participant}} --profile {}".format(CONFIG_FILE, PROFILE), needs_gpu=True, gpu_slots_required=GPU_SLOTS_PER_DEVICE))
+ 
+ 
+ # 04 CPU队列：T1到FLAIR刚体配准、T1到模板与图谱反变换。
+@@ -261,7 +273,7 @@ rule wmh:
+         recorded_subject_failure_allowed("PYTHONPATH={ROOT}/src {WMH_PYTHON} -m substain_features.cli stage wmh --config-file {CONFIG_FILE} --participant-id {{wildcards.participant}} --profile {PROFILE}".format(ROOT=ROOT, WMH_PYTHON=WMH_PYTHON, CONFIG_FILE=CONFIG_FILE, PROFILE=PROFILE))
+ 
+ 
+-# 06 CPU队列：T1 145/119/20维与技术常模。
++# 06 T1 GPU共享队列：每例占一个槽位；工作站1配置两槽，因此最多并行两例。
+ # ancient仅建立调度门：新T1等待该例WMH特征，已有T1不因时间戳重算。
+ rule t1:
+     input:
