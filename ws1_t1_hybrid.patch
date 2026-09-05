@@ -1,0 +1,215 @@
+--- a/workflow/Snakefile
++++ b/workflow/Snakefile
+@@ -102,10 +102,10 @@
+ T1_PYTHON = str(ROOT / config["execution"].get("t1_python", "envs/t1/bin/python"))
+ GPU_LOCK_DIR = str(ROOT / config["execution"].get("gpu_lock_dir", "derivatives/substain_features/.gpu-locks"))
+-def gpu_prefix(slots_required):
++def gpu_prefix(slots_required, cpu_fallback=False):
+     return (
+         "PYTHONPATH={root}/src {core} -m substain_features.gpu_pool "
+         "--gpu-ids {devices} --lock-dir {locks} "
+         "--slots-per-gpu {slots_per_gpu} --slots-required {slots_required} "
+-        "-- /usr/bin/env PYTHONPATH={root}/src "
++        "{fallback}-- /usr/bin/env PYTHONPATH={root}/src "
+     ).format(
+         root=ROOT,
+@@ -115,11 +115,12 @@
+         slots_per_gpu=GPU_SLOTS_PER_DEVICE,
+         slots_required=slots_required,
++        fallback="--cpu-fallback " if cpu_fallback else "",
+     )
+
+
+-def execution_command(python, command, needs_gpu=False, gpu_slots_required=1):
++def execution_command(python, command, needs_gpu=False, gpu_slots_required=1, cpu_fallback=False):
+     direct = "PYTHONPATH={}/src {} {}".format(ROOT, python, command)
+     if PROFILE == "gpu" and needs_gpu:
+-        return gpu_prefix(gpu_slots_required) + "{} {}".format(python, command)
++        return gpu_prefix(gpu_slots_required, cpu_fallback) + "{} {}".format(python, command)
+     return direct
+
+@@ -274,5 +275,5 @@
+
+
+-# 06 T1 GPU共享队列：每例占一个槽位；工作站1配置两槽，因此最多并行两例。
++# 06 T1启动时尝试GPU0一槽；槽忙或WMH已进入准入区则立即CPU，不中途切换。
+ # ancient仅建立调度门：新T1等待该例WMH特征，已有T1不因时间戳重算。
+ rule t1:
+@@ -285,8 +286,8 @@
+     priority: 150
+     resources:
+-        gpu=1 if PROFILE == "gpu" else 0
++        gpu=0
+     threads: CPU_HEAVY_THREADS
+     shell:
+-        recorded_subject_failure_allowed(execution_command(T1_PYTHON, "-m substain_features.cli stage t1 --config-file {} --participant-id {{wildcards.participant}} --profile {}".format(CONFIG_FILE, PROFILE), needs_gpu=True))
++        recorded_subject_failure_allowed(execution_command(T1_PYTHON, "-m substain_features.cli stage t1 --config-file {} --participant-id {{wildcards.participant}} --profile {}".format(CONFIG_FILE, PROFILE), needs_gpu=True, cpu_fallback=True))
+
+
+--- a/src/substain_features/gpu_pool.py
++++ b/src/substain_features/gpu_pool.py
+@@ -6,4 +6,5 @@
+ import fcntl
+ import os
++import signal
+ import subprocess
+ import time
+@@ -76,4 +77,5 @@
+     slots_per_gpu: int = 1,
+     slots_required: int = 1,
++    cpu_fallback: bool = False,
+ ) -> int:
+     """等待任一GPU的所需槽位，持锁运行子进程并设置可见设备。"""
+@@ -87,22 +89,129 @@
+     if slots_required < 1 or slots_required > slots_per_gpu:
+         raise ValueError("任务所需GPU槽位必须位于1到每卡槽位数之间")
++    cpu_command = None
++    if cpu_fallback:
++        cpu_command = _t1_cpu_command(command)
++        if list(gpu_ids) != ["0"] or slots_per_gpu != 2 or slots_required != 1:
++            raise ValueError("T1 CPU回退仅支持GPU0的双槽、每例一槽")
+     lock_dir.mkdir(parents=True, exist_ok=True)
++    # WMH在等待旧T1释放槽位期间也持有准入锁，避免新T1抢先进入。
++    # T1仅在准入和取槽这一小段持有准入锁，随后立即释放。
+     while True:
+         for gpu_id in gpu_ids:
+-            handles = _try_acquire_slots(
+-                str(gpu_id), lock_dir, slots_per_gpu, slots_required
+-            )
+-            if not handles:
+-                continue
++            gate = (lock_dir / "gpu-{}-admission.lock".format(gpu_id)).open("a+")
++            handles = []
+             try:
+-                environment = os.environ.copy()
+-                environment["CUDA_VISIBLE_DEVICES"] = str(gpu_id)
+-                environment["SUBSTAIN_ASSIGNED_GPU"] = str(gpu_id)
+-                environment["SUBSTAIN_ASSIGNED_GPU_SLOTS"] = str(slots_required)
+-                completed = subprocess.run(list(command), env=environment, check=False)
+-                return int(completed.returncode)
++                try:
++                    fcntl.flock(gate.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
++                except BlockingIOError:
++                    gate.close()
++                    if cpu_command is not None:
++                        return _run_selected(cpu_command, None, 0, "admission_busy")
++                    continue
++                while True:
++                    handles = _try_acquire_slots(
++                        str(gpu_id), lock_dir, slots_per_gpu, slots_required
++                    )
++                    if handles:
++                        break
++                    if cpu_command is not None:
++                        _release_locks([gate])
++                        return _run_selected(cpu_command, None, 0, "slots_busy")
++                    if slots_required != slots_per_gpu:
++                        break
++                    time.sleep(0.25)
++                if not handles:
++                    continue
++                if slots_required != slots_per_gpu:
++                    _release_locks([gate])
++                return _run_selected(command, str(gpu_id), slots_required, "slot_acquired")
+             finally:
+                 _release_locks(handles)
++                if not gate.closed:
++                    _release_locks([gate])
+         time.sleep(0.25)
++
++
++def _t1_cpu_command(command: Sequence[str]) -> List[str]:
++    """只替换已知T1 CLI的profile，不接受任意命令的隐式CPU回退。"""
++    result = list(command)
++    marker = ["-m", "substain_features.cli", "stage", "t1"]
++    if not any(result[index:index + 4] == marker for index in range(len(result))):
++        raise ValueError("--cpu-fallback仅适用于substain_features.cli stage t1")
++    if result.count("--profile") != 1:
++        raise ValueError("T1必须显式且仅指定一次--profile gpu")
++    index = result.index("--profile") + 1
++    if index >= len(result) or result[index] != "gpu":
++        raise ValueError("T1必须使用--profile gpu作为首选设备")
++    result[index] = "cpu"
++    return result
++
++
++def _run_selected(command: Sequence[str], gpu_id: Optional[str], slots: int, reason: str) -> int:
++    environment = os.environ.copy()
++    # 不从父包装器继承陈旧的GPU分配标记。
++    for key in list(environment):
++        if key.startswith("SUBSTAIN_ASSIGNED_GPU"):
++            environment.pop(key)
++    environment["CUDA_VISIBLE_DEVICES"] = "" if gpu_id is None else gpu_id
++    if gpu_id is not None:
++        environment["SUBSTAIN_ASSIGNED_GPU"] = gpu_id
++        environment["SUBSTAIN_ASSIGNED_GPU_SLOTS"] = str(slots)
++    args = list(command)
++    participant = args[args.index("--participant-id") + 1] if "--participant-id" in args else "NA"
++    stage = args[args.index("stage") + 1] if "stage" in args else "unknown"
++    print("GPU_DISPATCH stage={} participant={} device={} reason={} slots={}".format(
++        stage, participant, "cpu" if gpu_id is None else "gpu" + gpu_id, reason, slots
++    ), flush=True)
++
++    # 子进程与包装器保留原进程组。只向包装器发送TERM时，也转发给
++    # 子进程树并等待退出；锁不在模型仍运行时提前释放。部署仍只发组TERM。
++    child = None
++    received = []
++    terminating = {}
++
++    def terminate(signum, frame):
++        received.append(signum)
++        if child is not None:
++            _terminate_tree(child.pid, signum, terminating)
++
++    previous = {sig: signal.signal(sig, terminate) for sig in (signal.SIGTERM, signal.SIGINT)}
++    try:
++        child = subprocess.Popen(args, env=environment)
++        if received:
++            _terminate_tree(child.pid, received[-1], terminating)
++        returncode = child.wait()
++        while any(_process_identity(pid) == identity for pid, identity in list(terminating.items())):
++            time.sleep(0.1)
++        return 128 + received[-1] if received else int(returncode)
++    finally:
++        for sig, handler in previous.items():
++            signal.signal(sig, handler)
++
++
++def _process_identity(pid: int) -> Optional[str]:
++    try:
++        fields = Path("/proc/{}/stat".format(pid)).read_text().rsplit(")", 1)[1].split()
++        return None if fields[0] == "Z" else fields[19]
++    except (OSError, IndexError):
++        return None
++
++
++def _terminate_tree(pid: int, signum: int, terminating: dict) -> None:
++    # Linux的children接口无需扫描其他用户进程，也不检测其他GPU。
++    try:
++        children = Path("/proc/{}/task/{}/children".format(pid, pid)).read_text().split()
++    except OSError:
++        children = []
++    for value in children:
++        _terminate_tree(int(value), signum, terminating)
++    identity = _process_identity(pid)
++    if identity is None:
++        return
++    terminating[pid] = identity
++    try:
++        os.kill(pid, signum)
++    except ProcessLookupError:
++        pass
+
+
+@@ -113,4 +222,5 @@
+     parser.add_argument("--slots-per-gpu", type=int, default=1)
+     parser.add_argument("--slots-required", type=int, default=1)
++    parser.add_argument("--cpu-fallback", action="store_true", help="仅T1：空槽用GPU0，否则立即CPU")
+     parser.add_argument("command", nargs=argparse.REMAINDER)
+     args = parser.parse_args()
+@@ -125,4 +235,5 @@
+             slots_per_gpu=args.slots_per_gpu,
+             slots_required=args.slots_required,
++            cpu_fallback=args.cpu_fallback,
+         )
+     )

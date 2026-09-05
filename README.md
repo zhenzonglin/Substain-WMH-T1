@@ -2,6 +2,67 @@
 
 这是工作站1的轻量补丁分支，不包含完整项目源码、环境、模型、影像或分析结果。
 
+## 最新：T1空槽用GPU0，忙则立即CPU（2026-09-05）
+
+已运行滚动200例、GPU0双槽版本的工作站1，使用本节的新部署器。下方旧章节保留作为历史说明，**不要在新补丁后重复运行旧部署器**。
+
+```bash
+(
+set -euo pipefail
+cd /data/usersdir/linzhenzong/Substain-ws1-rolling-patch-lite
+git pull --ff-only
+sha256sum -c SHA256SUMS
+bash deploy_ws1_t1_hybrid.sh /data/usersdir/linzhenzong/Substain
+)
+```
+
+- T1在启动时非阻塞尝试GPU0的一个槽位；成功则GPU，忙则马上用原`--profile cpu`入口。CPU任务不会中途切到GPU。
+- GPU版T1最多两例。CPU版T1不另设并行上限，每例在Snakemake中占4线程，与其他阶段共享96核预算。CPU预算可能被T1占满，使上游等待。
+- T1的Snakemake `gpu=0`表示不预先占用GPU调度令牌，不表示强制CPU。实际GPU占用由文件锁控制。
+- WMH请求2个GPU令牌，并独占GPU0的两个槽；WMH取得准入锁后，即使仍在等旧T1结束，新T1也只走CPU。CPU版T1可与WMH同时运行。
+- 只使用GPU0，不检测或调用GPU1/2。不增加推理失败后的跨设备重试。
+- 保留registration 8线程、滚动200例、原V1.0.9入口、现有状态/runtime和cleanup。不改环境、配置、数据、资源或V1.1标签。
+
+`ws1_t1_hybrid.patch`只修改`workflow/Snakefile`和`src/substain_features/gpu_pool.py`。部署器支持此前WMH令牌为1或2的两个已知双槽版本；未知GPU锁源码或补丁上下文会在停止分析前中止。Python可为合法的虚拟环境软链接。
+
+部署器核对实际derivatives、96核/4线程/200例设置及PID/PGID/cwd/启动参数，备份两个源码文件与活动阶段，只发TERM并等最多60秒。只有状态在本次停止时间内新写入、且明确含SIGTERM/退出143等标记的失败才归档；有效完成结果和历史失败保留。不能确认的新失败会阻止重启，等待人工检查。为本次中断且缺失的输出清理对应Snakemake元数据，不全局重置状态。
+
+编译、Shell检查、Snakemake解析及解锁通过后，恢复原分析入口。验证失败恢复源码并保持停止；重启后的运行错误只报告，不在活动进程下覆盖源码。归档位置输出为`archive/t1-hybrid-*`，其中`before/`可恢复原两个文件；恢复前必须先停止并核验项目进程。
+
+### 验证和观察
+
+不使用模型或实际GPU的Linux测试：
+
+```bash
+cd /data/usersdir/linzhenzong/Substain-ws1-rolling-patch-lite
+/data/usersdir/linzhenzong/Substain/envs/core-venv/bin/python \
+  verify_ws1_t1_hybrid.py /data/usersdir/linzhenzong/Substain --snakemake
+```
+
+已在本地Linux Snakemake 7.32.4通过两GPU T1、CPU回退、WMH等待/独占、并发竞争、失败和TERM释放测试。真实调度测试同时启动24个四线程T1，证明96核预算生效且不被两个GPU令牌限制。测试不执行影像、模型或A100推理，不等于工作站病例验收通过。
+
+完整检查结果和未通过项见[验证记录](VALIDATION_T1_HYBRID.md)。全项目pytest仍有5项旧断言或本地缺少资源导致的失败，未宣称全项目测试全绿。
+
+运行日志会出现：
+
+```text
+GPU_DISPATCH stage=t1 participant=... device=gpu0 reason=slot_acquired slots=1
+GPU_DISPATCH stage=t1 participant=... device=cpu reason=slots_busy slots=0
+GPU_DISPATCH stage=t1 participant=... device=cpu reason=admission_busy slots=0
+GPU_DISPATCH stage=wmh-seg participant=... device=gpu0 reason=slot_acquired slots=2
+```
+
+`admission_busy`表示准入锁被占用（通常为等待或运行的WMH，也可能是另一T1短暂的取槽操作）。选择设备后，子进程实际成功状态里的`details.effective_device`与runtime仍是最终判断依据。
+
+新版窗口3原命令继续使用：
+
+```bash
+cd /data/usersdir/linzhenzong/Substain &&
+envs/core-venv/bin/python scripts/monitor_ws1_progress_resources.py --interval 30
+```
+
+工作站验收仍需至少两例GPU版T1、一例CPU版T1和一例WMH成功完成，核对有效设备、耗时、cleanup及无CUDA OOM。仅看到设备分配日志不能视为推理成功。
+
 仓库内容只有：
 
 - `ws1_rolling_window.patch`：滚动200例调度补丁；
@@ -11,9 +72,12 @@
 - `ws1_gpu_throughput_first.patch`：让WMH请求两个Snakemake GPU令牌，避免等待中的WMH占住第二个T1令牌；
 - `deploy_ws1_gpu_throughput.sh`：从已部署双槽版本切换为吞吐优先并重启；
 - `verify_ws1_gpu_slots.py`：不运行模型的Linux文件锁行为测试；
+- `ws1_t1_hybrid.patch`、`ws1_t1_hybrid_manifest.json`：T1混合设备增量及已知GPU锁校验值；
+- `deploy_ws1_t1_hybrid.sh`、`deploy_ws1_t1_hybrid.py`：混合设备部署入口与安全检查；
+- `verify_ws1_t1_hybrid.py`、`test_ws1_t1_hybrid_deploy.py`：Linux并发/实际调度测试和部署安全测试；
 - `SHA256SUMS`：文件校验和。
 
-补丁保留现场已有设置：T1和WMH使用GPU0，registration使用CPU 8线程，cleanup继续删除形变场。CPU总预算仍为96核。新逻辑最多放行200例，每产生1个终态`cleanup.json`就补入下一例。
+历史双槽补丁中T1和WMH均使用GPU0；最新混合设备补丁改为T1空槽GPU、忙则CPU。各版本均保留registration CPU 8线程、cleanup删除形变场、96核总预算，以及每完成一个终态`cleanup.json`补入一例的滚动200例逻辑。
 
 ## 工作站1使用方法
 
