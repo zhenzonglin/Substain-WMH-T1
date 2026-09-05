@@ -121,6 +121,8 @@ class DeployTests(unittest.TestCase):
                                 str(BUNDLE / 'ws1_t1_hybrid.patch')], cwd=root, check=True)
                 snake = (root / deploy.FILES[0]).read_text()
                 self.assertIn('cpu_fallback=True', snake)
+                self.assertIn('T1_GPU_MIN_FREE_MEMORY_MIB', snake)
+                self.assertIn('WMH_GPU_MIN_FREE_MEMORY_MIB', snake)
                 self.assertIn('gpu=GPU_SLOTS_PER_DEVICE if PROFILE == "gpu" else 0', snake)
                 self.assertEqual(deploy.text_digest(root / deploy.FILES[1]),
                                  json.loads((BUNDLE / 'ws1_t1_hybrid_manifest.json').read_text())['new_pool_sha256'])

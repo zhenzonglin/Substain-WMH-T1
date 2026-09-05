@@ -1,71 +1,36 @@
---- a/workflow/Snakefile
-+++ b/workflow/Snakefile
-@@ -102,10 +102,10 @@
- T1_PYTHON = str(ROOT / config["execution"].get("t1_python", "envs/t1/bin/python"))
- GPU_LOCK_DIR = str(ROOT / config["execution"].get("gpu_lock_dir", "derivatives/substain_features/.gpu-locks"))
--def gpu_prefix(slots_required):
-+def gpu_prefix(slots_required, cpu_fallback=False):
-     return (
-         "PYTHONPATH={root}/src {core} -m substain_features.gpu_pool "
-         "--gpu-ids {devices} --lock-dir {locks} "
-         "--slots-per-gpu {slots_per_gpu} --slots-required {slots_required} "
--        "-- /usr/bin/env PYTHONPATH={root}/src "
-+        "{fallback}-- /usr/bin/env PYTHONPATH={root}/src "
-     ).format(
-         root=ROOT,
-@@ -115,11 +115,12 @@
-         slots_per_gpu=GPU_SLOTS_PER_DEVICE,
-         slots_required=slots_required,
-+        fallback="--cpu-fallback " if cpu_fallback else "",
-     )
-
-
--def execution_command(python, command, needs_gpu=False, gpu_slots_required=1):
-+def execution_command(python, command, needs_gpu=False, gpu_slots_required=1, cpu_fallback=False):
-     direct = "PYTHONPATH={}/src {} {}".format(ROOT, python, command)
-     if PROFILE == "gpu" and needs_gpu:
--        return gpu_prefix(gpu_slots_required) + "{} {}".format(python, command)
-+        return gpu_prefix(gpu_slots_required, cpu_fallback) + "{} {}".format(python, command)
-     return direct
-
-@@ -274,5 +275,5 @@
-
-
--# 06 T1 GPU共享队列：每例占一个槽位；工作站1配置两槽，因此最多并行两例。
-+# 06 T1启动时尝试GPU0一槽；槽忙或WMH已进入准入区则立即CPU，不中途切换。
- # ancient仅建立调度门：新T1等待该例WMH特征，已有T1不因时间戳重算。
- rule t1:
-@@ -285,8 +286,8 @@
-     priority: 150
-     resources:
--        gpu=1 if PROFILE == "gpu" else 0
-+        gpu=0
-     threads: CPU_HEAVY_THREADS
-     shell:
--        recorded_subject_failure_allowed(execution_command(T1_PYTHON, "-m substain_features.cli stage t1 --config-file {} --participant-id {{wildcards.participant}} --profile {}".format(CONFIG_FILE, PROFILE), needs_gpu=True))
-+        recorded_subject_failure_allowed(execution_command(T1_PYTHON, "-m substain_features.cli stage t1 --config-file {} --participant-id {{wildcards.participant}} --profile {}".format(CONFIG_FILE, PROFILE), needs_gpu=True, cpu_fallback=True))
-
-
+diff --git a/src/substain_features/gpu_pool.py b/src/substain_features/gpu_pool.py
+index 7a492bf..6540730 100644
 --- a/src/substain_features/gpu_pool.py
 +++ b/src/substain_features/gpu_pool.py
-@@ -6,4 +6,5 @@
+@@ -5,6 +5,7 @@ from __future__ import annotations
+ import argparse
  import fcntl
  import os
 +import signal
  import subprocess
  import time
-@@ -76,4 +77,5 @@
+ from pathlib import Path
+@@ -75,6 +76,8 @@ def run_with_gpu_lock(
+     lock_dir: Path,
      slots_per_gpu: int = 1,
      slots_required: int = 1,
 +    cpu_fallback: bool = False,
++    min_free_memory_mib: int = 0,
  ) -> int:
      """等待任一GPU的所需槽位，持锁运行子进程并设置可见设备。"""
-@@ -87,22 +89,129 @@
+
+@@ -86,32 +89,191 @@ def run_with_gpu_lock(
+         raise ValueError("每张GPU的槽位数必须为正整数")
      if slots_required < 1 or slots_required > slots_per_gpu:
          raise ValueError("任务所需GPU槽位必须位于1到每卡槽位数之间")
++    if min_free_memory_mib < 0:
++        raise ValueError("GPU最低空闲显存不能为负数")
 +    cpu_command = None
++    if cpu_fallback or min_free_memory_mib:
++        cpu_command = _cpu_profile_command(command)
 +    if cpu_fallback:
-+        cpu_command = _t1_cpu_command(command)
++        if _command_stage(command) != "t1":
++            raise ValueError("槽位忙时CPU回退仅适用于T1")
 +        if list(gpu_ids) != ["0"] or slots_per_gpu != 2 or slots_required != 1:
 +            raise ValueError("T1 CPU回退仅支持GPU0的双槽、每例一槽")
      lock_dir.mkdir(parents=True, exist_ok=True)
@@ -91,7 +56,7 @@
 +                    fcntl.flock(gate.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
 +                except BlockingIOError:
 +                    gate.close()
-+                    if cpu_command is not None:
++                    if cpu_fallback:
 +                        return _run_selected(cpu_command, None, 0, "admission_busy")
 +                    continue
 +                while True:
@@ -100,7 +65,7 @@
 +                    )
 +                    if handles:
 +                        break
-+                    if cpu_command is not None:
++                    if cpu_fallback:
 +                        _release_locks([gate])
 +                        return _run_selected(cpu_command, None, 0, "slots_busy")
 +                    if slots_required != slots_per_gpu:
@@ -108,6 +73,20 @@
 +                    time.sleep(0.25)
 +                if not handles:
 +                    continue
++                if min_free_memory_mib:
++                    free_memory = _gpu_free_memory_mib(str(gpu_id))
++                    if free_memory is None or free_memory < min_free_memory_mib:
++                        reason = (
++                            "memory_query_failed"
++                            if free_memory is None
++                            else "free_memory_{}_lt_{}".format(
++                                free_memory, min_free_memory_mib
++                            )
++                        )
++                        _release_locks(handles)
++                        handles = []
++                        _release_locks([gate])
++                        return _run_selected(cpu_command, None, 0, reason)
 +                if slots_required != slots_per_gpu:
 +                    _release_locks([gate])
 +                return _run_selected(command, str(gpu_id), slots_required, "slot_acquired")
@@ -116,21 +95,52 @@
 +                if not gate.closed:
 +                    _release_locks([gate])
          time.sleep(0.25)
+
+
++def _command_stage(command: Sequence[str]) -> str:
++    args = list(command)
++    marker = ["-m", "substain_features.cli", "stage"]
++    for index in range(len(args) - 3):
++        if args[index:index + 3] == marker:
++            return args[index + 3]
++    return ""
 +
 +
-+def _t1_cpu_command(command: Sequence[str]) -> List[str]:
-+    """只替换已知T1 CLI的profile，不接受任意命令的隐式CPU回退。"""
++def _cpu_profile_command(command: Sequence[str]) -> List[str]:
++    """仅将已知T1或WMH-SynthSeg命令从GPU profile切换为CPU。"""
 +    result = list(command)
-+    marker = ["-m", "substain_features.cli", "stage", "t1"]
-+    if not any(result[index:index + 4] == marker for index in range(len(result))):
-+        raise ValueError("--cpu-fallback仅适用于substain_features.cli stage t1")
++    stage = _command_stage(result)
++    if stage not in {"t1", "wmh-seg"}:
++        raise ValueError("显存CPU回退仅适用于T1或WMH-SynthSeg")
 +    if result.count("--profile") != 1:
-+        raise ValueError("T1必须显式且仅指定一次--profile gpu")
++        raise ValueError("任务必须显式且仅指定一次--profile gpu")
 +    index = result.index("--profile") + 1
 +    if index >= len(result) or result[index] != "gpu":
-+        raise ValueError("T1必须使用--profile gpu作为首选设备")
++        raise ValueError("任务必须使用--profile gpu作为首选设备")
 +    result[index] = "cpu"
 +    return result
++
++
++def _gpu_free_memory_mib(gpu_id: str) -> Optional[int]:
++    """查询物理GPU当前空闲显存；查询失败时返回None并安全转CPU。"""
++    try:
++        completed = subprocess.run(
++            [
++                "nvidia-smi",
++                "--id={}".format(gpu_id),
++                "--query-gpu=memory.free",
++                "--format=csv,noheader,nounits",
++            ],
++            capture_output=True,
++            text=True,
++            check=False,
++        )
++    except FileNotFoundError:
++        return None
++    values = [line.strip() for line in completed.stdout.splitlines() if line.strip()]
++    if completed.returncode != 0 or len(values) != 1 or not values[0].isdigit():
++        return None
++    return int(values[0])
 +
 +
 +def _run_selected(command: Sequence[str], gpu_id: Optional[str], slots: int, reason: str) -> int:
@@ -199,17 +209,95 @@
 +        os.kill(pid, signum)
 +    except ProcessLookupError:
 +        pass
-
-
-@@ -113,4 +222,5 @@
++
++
+ def main() -> None:
+     parser = argparse.ArgumentParser(description="为GPU任务分配共享或独占槽位")
+     parser.add_argument("--gpu-ids", required=True, help="逗号分隔的设备编号")
+     parser.add_argument("--lock-dir", type=Path, required=True)
      parser.add_argument("--slots-per-gpu", type=int, default=1)
      parser.add_argument("--slots-required", type=int, default=1)
 +    parser.add_argument("--cpu-fallback", action="store_true", help="仅T1：空槽用GPU0，否则立即CPU")
++    parser.add_argument("--min-free-memory-mib", type=int, default=0, help="空闲显存低于此值时使用CPU")
      parser.add_argument("command", nargs=argparse.REMAINDER)
      args = parser.parse_args()
-@@ -125,4 +235,5 @@
+     command = list(args.command)
+@@ -124,6 +286,8 @@ def main() -> None:
+             args.lock_dir,
              slots_per_gpu=args.slots_per_gpu,
              slots_required=args.slots_required,
 +            cpu_fallback=args.cpu_fallback,
++            min_free_memory_mib=args.min_free_memory_mib,
          )
      )
+
+diff --git a/workflow/Snakefile b/workflow/Snakefile
+index e94e8e6..639cdcc 100644
+--- a/workflow/Snakefile
++++ b/workflow/Snakefile
+@@ -101,12 +101,14 @@ CORE = str(ROOT / config["execution"].get("core_python", "envs/core-venv/bin/pyt
+ WMH_PYTHON = str(ROOT / config["execution"].get("wmh_python", "envs/wmh/bin/python"))
+ T1_PYTHON = str(ROOT / config["execution"].get("t1_python", "envs/t1/bin/python"))
+ GPU_LOCK_DIR = str(ROOT / config["execution"].get("gpu_lock_dir", "derivatives/substain_features/.gpu-locks"))
+-def gpu_prefix(slots_required):
++T1_GPU_MIN_FREE_MEMORY_MIB = max(0, int(config["execution"].get("t1_gpu_min_free_memory_mib", 12288)))
++WMH_GPU_MIN_FREE_MEMORY_MIB = max(0, int(config["execution"].get("wmh_gpu_min_free_memory_mib", 20480)))
++def gpu_prefix(slots_required, cpu_fallback=False, min_free_memory_mib=0):
+     return (
+         "PYTHONPATH={root}/src {core} -m substain_features.gpu_pool "
+         "--gpu-ids {devices} --lock-dir {locks} "
+         "--slots-per-gpu {slots_per_gpu} --slots-required {slots_required} "
+-        "-- /usr/bin/env PYTHONPATH={root}/src "
++        "{fallback}{memory}-- /usr/bin/env PYTHONPATH={root}/src "
+     ).format(
+         root=ROOT,
+         core=CORE,
+@@ -114,13 +116,15 @@ def gpu_prefix(slots_required):
+         locks=GPU_LOCK_DIR,
+         slots_per_gpu=GPU_SLOTS_PER_DEVICE,
+         slots_required=slots_required,
++        fallback="--cpu-fallback " if cpu_fallback else "",
++        memory="--min-free-memory-mib {} ".format(min_free_memory_mib) if min_free_memory_mib else "",
+     )
+
+
+-def execution_command(python, command, needs_gpu=False, gpu_slots_required=1):
++def execution_command(python, command, needs_gpu=False, gpu_slots_required=1, cpu_fallback=False, min_free_memory_mib=0):
+     direct = "PYTHONPATH={}/src {} {}".format(ROOT, python, command)
+     if PROFILE == "gpu" and needs_gpu:
+-        return gpu_prefix(gpu_slots_required) + "{} {}".format(python, command)
++        return gpu_prefix(gpu_slots_required, cpu_fallback, min_free_memory_mib) + "{} {}".format(python, command)
+     return direct
+
+
+@@ -220,7 +224,7 @@ rule wmh_segmentation:
+         gpu=GPU_SLOTS_PER_DEVICE if PROFILE == "gpu" else 0,
+         wmh_exclusive=1 if PROFILE == "gpu" else 0
+     shell:
+-        recorded_subject_failure_allowed(execution_command(WMH_PYTHON, "-m substain_features.cli stage wmh-seg --config-file {} --participant-id {{wildcards.participant}} --profile {}".format(CONFIG_FILE, PROFILE), needs_gpu=True, gpu_slots_required=GPU_SLOTS_PER_DEVICE))
++        recorded_subject_failure_allowed(execution_command(WMH_PYTHON, "-m substain_features.cli stage wmh-seg --config-file {} --participant-id {{wildcards.participant}} --profile {}".format(CONFIG_FILE, PROFILE), needs_gpu=True, gpu_slots_required=GPU_SLOTS_PER_DEVICE, min_free_memory_mib=WMH_GPU_MIN_FREE_MEMORY_MIB))
+
+
+ # 04 CPU队列：T1到FLAIR刚体配准、T1到模板与图谱反变换。
+@@ -273,7 +277,7 @@ rule wmh:
+         recorded_subject_failure_allowed("PYTHONPATH={ROOT}/src {WMH_PYTHON} -m substain_features.cli stage wmh --config-file {CONFIG_FILE} --participant-id {{wildcards.participant}} --profile {PROFILE}".format(ROOT=ROOT, WMH_PYTHON=WMH_PYTHON, CONFIG_FILE=CONFIG_FILE, PROFILE=PROFILE))
+
+
+-# 06 T1 GPU共享队列：每例占一个槽位；工作站1配置两槽，因此最多并行两例。
++# 06 T1启动时尝试GPU0一槽；槽忙、WMH准入或空闲显存不足则立即CPU，不中途切换。
+ # ancient仅建立调度门：新T1等待该例WMH特征，已有T1不因时间戳重算。
+ rule t1:
+     input:
+@@ -284,10 +288,10 @@ rule t1:
+         participant="|".join(PARTICIPANTS)
+     priority: 150
+     resources:
+-        gpu=1 if PROFILE == "gpu" else 0
++        gpu=0
+     threads: CPU_HEAVY_THREADS
+     shell:
+-        recorded_subject_failure_allowed(execution_command(T1_PYTHON, "-m substain_features.cli stage t1 --config-file {} --participant-id {{wildcards.participant}} --profile {}".format(CONFIG_FILE, PROFILE), needs_gpu=True))
++        recorded_subject_failure_allowed(execution_command(T1_PYTHON, "-m substain_features.cli stage t1 --config-file {} --participant-id {{wildcards.participant}} --profile {}".format(CONFIG_FILE, PROFILE), needs_gpu=True, cpu_fallback=True, min_free_memory_mib=T1_GPU_MIN_FREE_MEMORY_MIB))
+
+
+ # 07 自动生成集中QC材料；不包含人工判读，也不门控特征聚合

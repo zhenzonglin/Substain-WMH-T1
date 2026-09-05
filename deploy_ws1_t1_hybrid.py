@@ -253,18 +253,24 @@ def patch_snakefile(path):
     text = raw.decode('utf-8').replace('\r\n', '\n')
     require('\r' not in text, 'Snakefile含混合换行符')
     replacements = (
+        ('GPU_LOCK_DIR = str(ROOT / config["execution"].get("gpu_lock_dir", "derivatives/substain_features/.gpu-locks"))',
+         'GPU_LOCK_DIR = str(ROOT / config["execution"].get("gpu_lock_dir", "derivatives/substain_features/.gpu-locks"))\n'
+         'T1_GPU_MIN_FREE_MEMORY_MIB = max(0, int(config["execution"].get("t1_gpu_min_free_memory_mib", 12288)))\n'
+         'WMH_GPU_MIN_FREE_MEMORY_MIB = max(0, int(config["execution"].get("wmh_gpu_min_free_memory_mib", 20480)))',
+         'GPU空闲显存阈值'),
         ('def gpu_prefix(slots_required):',
-         'def gpu_prefix(slots_required, cpu_fallback=False):', 'gpu_prefix定义'),
+         'def gpu_prefix(slots_required, cpu_fallback=False, min_free_memory_mib=0):', 'gpu_prefix定义'),
         ('        "-- /usr/bin/env PYTHONPATH={root}/src "',
-         '        "{fallback}-- /usr/bin/env PYTHONPATH={root}/src "', '包装器fallback参数'),
+         '        "{fallback}{memory}-- /usr/bin/env PYTHONPATH={root}/src "', '包装器fallback参数'),
         ('        slots_required=slots_required,\n    )',
-         '        slots_required=slots_required,\n        fallback="--cpu-fallback " if cpu_fallback else "",\n    )',
+         '        slots_required=slots_required,\n        fallback="--cpu-fallback " if cpu_fallback else "",\n'
+         '        memory="--min-free-memory-mib {} ".format(min_free_memory_mib) if min_free_memory_mib else "",\n    )',
          '包装器fallback格式化'),
         ('def execution_command(python, command, needs_gpu=False, gpu_slots_required=1):',
-         'def execution_command(python, command, needs_gpu=False, gpu_slots_required=1, cpu_fallback=False):',
+         'def execution_command(python, command, needs_gpu=False, gpu_slots_required=1, cpu_fallback=False, min_free_memory_mib=0):',
          'execution_command定义'),
         ('        return gpu_prefix(gpu_slots_required) + "{} {}".format(python, command)',
-         '        return gpu_prefix(gpu_slots_required, cpu_fallback) + "{} {}".format(python, command)',
+         '        return gpu_prefix(gpu_slots_required, cpu_fallback, min_free_memory_mib) + "{} {}".format(python, command)',
          'execution_command调用'),
     )
     for old, new, label in replacements:
@@ -287,12 +293,16 @@ def patch_snakefile(path):
                 'WMH独占资源上下文不匹配')
         require(body.count('gpu_slots_required=GPU_SLOTS_PER_DEVICE') == 1,
                 'WMH物理双槽上下文不匹配')
+        body = replace_once(body, 'gpu_slots_required=GPU_SLOTS_PER_DEVICE))',
+                            'gpu_slots_required=GPU_SLOTS_PER_DEVICE, min_free_memory_mib=WMH_GPU_MIN_FREE_MEMORY_MIB))',
+                            'WMH显存CPU回退入口')
         return body
 
     def transform_t1(body):
         body = replace_once(body, '        gpu=1 if PROFILE == "gpu" else 0\n',
                             '        gpu=0\n', 'T1调度令牌')
-        body = replace_once(body, 'needs_gpu=True))', 'needs_gpu=True, cpu_fallback=True))',
+        body = replace_once(body, 'needs_gpu=True))',
+                            'needs_gpu=True, cpu_fallback=True, min_free_memory_mib=T1_GPU_MIN_FREE_MEMORY_MIB))',
                             'T1 CPU回退入口')
         require(body.count('threads: CPU_HEAVY_THREADS') == 1, 'T1四线程声明上下文不匹配')
         return body
@@ -302,7 +312,7 @@ def patch_snakefile(path):
     old_comment = '# 06 T1 GPU共享队列：每例占一个槽位；工作站1配置两槽，因此最多并行两例。'
     if old_comment in text:
         text = replace_once(text, old_comment,
-                            '# 06 T1启动时尝试GPU0一槽；槽忙或WMH已进入准入区则立即CPU，不中途切换。',
+                            '# 06 T1启动时尝试GPU0一槽；槽忙、WMH准入或空闲显存不足则立即CPU，不中途切换。',
                             'T1规则注释')
     path.write_bytes(text.replace('\n', eol).encode('utf-8'))
     return text
@@ -322,7 +332,9 @@ def main():
     if text_digest(root / FILES[1]) == manifest['new_pool_sha256'] and 'cpu_fallback=True' in snake:
         t1 = re.search(r'^rule t1:\n.*?(?=^rule |\Z)', snake, re.M | re.S).group()
         wmh = re.search(r'^rule wmh_segmentation:\n.*?(?=^rule |\Z)', snake, re.M | re.S).group()
-        require('gpu=0' in t1 and 'gpu=GPU_SLOTS_PER_DEVICE if PROFILE == "gpu" else 0' in wmh,
+        require('gpu=0' in t1 and 'min_free_memory_mib=T1_GPU_MIN_FREE_MEMORY_MIB' in t1
+                and 'gpu=GPU_SLOTS_PER_DEVICE if PROFILE == "gpu" else 0' in wmh
+                and 'min_free_memory_mib=WMH_GPU_MIN_FREE_MEMORY_MIB' in wmh,
                 'GPU锁已更新，但Snakefile不是已知的混合设备版本')
         print('混合设备补丁已经存在；未重复停止或重启。请检查当前PID及GPU_DISPATCH日志。')
         return
@@ -457,7 +469,7 @@ def main():
         (archive / 'deployment.json').write_text(json.dumps(dict(pid=new_leader['pid'], log=str(log),
             source_sha256={rel: digest(root / rel) for rel in FILES},
             gpu_model_acceptance='PENDING: 2 GPU T1 + 1 CPU T1 + 1 WMH and cleanup'), indent=2))
-        print('部署并重启成功：PID=PGID={}；GPU0双槽，T1空槽GPU/忙则CPU；WMH独占。'.format(new_leader['pid']))
+        print('部署并重启成功：PID=PGID={}；GPU0双槽；T1槽忙或空闲显存<12288MiB转CPU；WMH空闲显存<20480MiB转CPU。'.format(new_leader['pid']))
         print('日志: {}\n归档: {}\n真实病例验收尚待运行完成；窗口3无需修改。'.format(log, archive))
 
 

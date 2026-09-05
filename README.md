@@ -2,7 +2,7 @@
 
 这是工作站1的轻量补丁分支，不包含完整项目源码、环境、模型、影像或分析结果。
 
-## 最新：T1空槽用GPU0，忙则立即CPU（2026-09-05）
+## 最新：GPU0可共享，显存不足自动CPU（2026-09-05）
 
 已运行滚动200例、GPU0双槽版本的工作站1，使用本节的新部署器。下方旧章节保留作为历史说明，**不要在新补丁后重复运行旧部署器**。
 
@@ -16,10 +16,11 @@ bash deploy_ws1_t1_hybrid.sh /data/usersdir/linzhenzong/Substain
 )
 ```
 
-- T1在启动时非阻塞尝试GPU0的一个槽位；成功则GPU，忙则马上用原`--profile cpu`入口。CPU任务不会中途切到GPU。
+- T1在启动时非阻塞尝试GPU0的一个槽位；槽忙或GPU0空闲显存低于`12288 MiB`时，马上使用原`--profile cpu`入口。CPU任务不会中途切到GPU。
 - GPU版T1最多两例。CPU版T1不另设并行上限，每例在Snakemake中占4线程，与其他阶段共享96核预算。CPU预算可能被T1占满，使上游等待。
 - T1的Snakemake `gpu=0`表示不预先占用GPU调度令牌，不表示强制CPU。实际GPU占用由文件锁控制。
-- WMH请求2个GPU令牌，并独占GPU0的两个槽；WMH取得准入锁后，即使仍在等旧T1结束，新T1也只走CPU。CPU版T1可与WMH同时运行。
+- WMH请求2个GPU令牌，并独占GPU0的两个项目槽；取得双槽后若GPU0空闲显存低于`20480 MiB`，该例WMH转CPU并释放GPU锁。WMH等待项目内旧T1期间不因槽忙提前转CPU。
+- 其他用户可以继续使用GPU0；本项目不读取其命令、不停止其进程。显存查询失败时采用CPU。阈值可通过配置中的`execution.t1_gpu_min_free_memory_mib`和`execution.wmh_gpu_min_free_memory_mib`覆盖。
 - 只使用GPU0，不检测或调用GPU1/2。不增加推理失败后的跨设备重试。
 - 保留registration 8线程、滚动200例、原V1.0.9入口、现有状态/runtime和cleanup。不改环境、配置、数据、资源或V1.1标签。
 
@@ -50,7 +51,7 @@ cd /data/usersdir/linzhenzong/Substain-ws1-rolling-patch-lite
   verify_ws1_t1_hybrid.py /data/usersdir/linzhenzong/Substain --snakemake
 ```
 
-已在本地Linux Snakemake 7.32.4通过两GPU T1、CPU回退、WMH等待/独占、并发竞争、失败和TERM释放测试。真实调度测试同时启动24个四线程T1，证明96核预算生效且不被两个GPU令牌限制。测试不执行影像、模型或A100推理，不等于工作站病例验收通过。
+Linux进程测试已通过两GPU T1、槽位/显存CPU回退、WMH等待/独占、显存查询失败、并发竞争、失败和TERM释放。此前在Snakemake 7.32.4中的真实调度测试同时启动24个四线程T1，证明96核预算生效且不被两个GPU令牌限制；本次未改变该调度资源。显存分支测试使用假的`nvidia-smi`数值，不执行影像、模型或A100推理，不等于工作站病例验收通过。
 
 完整检查结果和未通过项见[验证记录](VALIDATION_T1_HYBRID.md)。全项目pytest仍有5项旧断言或本地缺少资源导致的失败，未宣称全项目测试全绿。
 
@@ -60,7 +61,9 @@ cd /data/usersdir/linzhenzong/Substain-ws1-rolling-patch-lite
 GPU_DISPATCH stage=t1 participant=... device=gpu0 reason=slot_acquired slots=1
 GPU_DISPATCH stage=t1 participant=... device=cpu reason=slots_busy slots=0
 GPU_DISPATCH stage=t1 participant=... device=cpu reason=admission_busy slots=0
+GPU_DISPATCH stage=t1 participant=... device=cpu reason=free_memory_12000_lt_12288 slots=0
 GPU_DISPATCH stage=wmh-seg participant=... device=gpu0 reason=slot_acquired slots=2
+GPU_DISPATCH stage=wmh-seg participant=... device=cpu reason=free_memory_20000_lt_20480 slots=0
 ```
 
 `admission_busy`表示准入锁被占用（通常为等待或运行的WMH，也可能是另一T1短暂的取槽操作）。选择设备后，子进程实际成功状态里的`details.effective_device`与runtime仍是最终判断依据。
@@ -88,7 +91,7 @@ envs/core-venv/bin/python scripts/monitor_ws1_progress_resources.py --interval 3
 - `verify_ws1_t1_hybrid.py`、`test_ws1_t1_hybrid_deploy.py`：Linux并发/实际调度测试和部署安全测试；
 - `SHA256SUMS`：文件校验和。
 
-历史双槽补丁中T1和WMH均使用GPU0；最新混合设备补丁改为T1空槽GPU、忙则CPU。各版本均保留registration CPU 8线程、cleanup删除形变场、96核总预算，以及每完成一个终态`cleanup.json`补入一例的滚动200例逻辑。
+历史双槽补丁中T1和WMH均使用GPU0；最新混合设备补丁允许其他用户同时占用GPU0，并按空闲显存让T1或WMH转CPU。各版本均保留registration CPU 8线程、cleanup删除形变场、96核总预算，以及每完成一个终态`cleanup.json`补入一例的滚动200例逻辑。
 
 ## 工作站1使用方法
 

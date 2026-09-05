@@ -57,18 +57,32 @@ class Harness:
         (package / 'cli.py').write_text(CHILD)
         (package / 'gpu_pool.py').write_bytes((source / 'src/substain_features/gpu_pool.py').read_bytes())
         self.pool = package / 'gpu_pool.py'
+        binary = root / 'bin'
+        binary.mkdir()
+        nvidia_smi = binary / 'nvidia-smi'
+        nvidia_smi.write_text(
+            '#!/usr/bin/env python3\n'
+            'import os, sys\n'
+            'value = os.environ.get("HYBRID_TEST_FREE_MIB", "40000")\n'
+            'if value == "fail": raise SystemExit(1)\n'
+            'print(value)\n'
+        )
+        nvidia_smi.chmod(0o755)
         self.env = dict(os.environ, PYTHONPATH=str(root / 'src') + os.pathsep + os.environ.get('PYTHONPATH', ''), HYBRID_TEST_ROOT=str(root),
                         CUDA_VISIBLE_DEVICES='0', SUBSTAIN_ASSIGNED_GPU='stale',
-                        SUBSTAIN_ASSIGNED_GPU_SLOTS='stale', OMP_NUM_THREADS='4')
+                        SUBSTAIN_ASSIGNED_GPU_SLOTS='stale', OMP_NUM_THREADS='4',
+                        PATH=str(binary) + os.pathsep + os.environ.get('PATH', ''))
 
-    def launch(self, name, wmh=False):
+    def launch(self, name, wmh=False, free_memory='40000'):
         cmd = [sys.executable, str(self.pool), '--gpu-ids', '0', '--lock-dir', str(self.root / 'locks'),
-               '--slots-per-gpu', '2', '--slots-required', '2' if wmh else '1']
+               '--slots-per-gpu', '2', '--slots-required', '2' if wmh else '1',
+               '--min-free-memory-mib', '20480' if wmh else '12288']
         if not wmh:
             cmd.append('--cpu-fallback')
         cmd += ['--', sys.executable, '-m', 'substain_features.cli', 'stage', 'wmh-seg' if wmh else 't1',
                 '--participant-id', name, '--profile', 'gpu']
-        process = subprocess.Popen(cmd, env=self.env)
+        environment = dict(self.env, HYBRID_TEST_FREE_MIB=free_memory)
+        process = subprocess.Popen(cmd, env=environment)
         self.procs.append(process)
         return process
 
@@ -122,6 +136,12 @@ def process_tests(h):
     f = h.launch('f'); h.started('f', 'cpu')
     h.release('wmh', w)
     g = h.launch('g'); h.started('g', 'gpu'); h.release('g', g)
+    low_t1 = h.launch('low_t1', free_memory='12000')
+    h.started('low_t1', 'cpu'); h.release('low_t1', low_t1)
+    low_wmh = h.launch('low_wmh', True, free_memory='20000')
+    h.started('low_wmh', 'cpu'); h.release('low_wmh', low_wmh)
+    query_fail = h.launch('query_fail', free_memory='fail')
+    h.started('query_fail', 'cpu'); h.release('query_fail', query_fail)
     for name, proc in [('c', c), ('e', e), ('f', f)]:
         h.release(name, proc)
     fail = h.launch('fail'); h.started('fail', 'gpu')
@@ -144,14 +164,15 @@ def process_tests(h):
     assert 1 <= devices.count('gpu') <= 2 and devices.count('cpu') >= 10, devices
     for name, proc in pairs:
         h.release('race' + name, proc)
-    print('PASS: two GPU T1, immediate CPU fallback, WMH admission/exclusion, failure/TERM, races', flush=True)
+    print('PASS: two GPU T1, slot/memory CPU fallback, WMH admission/exclusion, failure/TERM, races', flush=True)
 
 
 def scheduler_test(h):
     snake = (h.source / 'workflow/Snakefile').read_text()
     helpers = snake[snake.index('def gpu_prefix('):snake.index('\nrule all:')]
     rule = re.search(r'^rule t1:\n.*?(?=^rule |\Z)', snake, re.M | re.S).group()
-    assert 'gpu=0' in rule and 'threads: CPU_HEAVY_THREADS' in rule and 'cpu_fallback=True' in rule
+    assert ('gpu=0' in rule and 'threads: CPU_HEAVY_THREADS' in rule and 'cpu_fallback=True' in rule
+            and 'min_free_memory_mib=T1_GPU_MIN_FREE_MEMORY_MIB' in rule)
     names = ['sched' + str(i) for i in range(26)]
     (h.root / 'input').mkdir()
     for name in names:
@@ -162,6 +183,8 @@ CORE = T1_PYTHON = {python!r}
 GPU_LOCK_DIR = str(ROOT / 'locks')
 GPU_DEVICES = '0'
 GPU_SLOTS_PER_DEVICE = 2
+T1_GPU_MIN_FREE_MEMORY_MIB = 12288
+WMH_GPU_MIN_FREE_MEMORY_MIB = 20480
 CPU_HEAVY_THREADS = 4
 PROFILE = 'gpu'
 CONFIG_FILE = ROOT / 'config.yaml'
