@@ -113,11 +113,35 @@ class DeployTests(unittest.TestCase):
                 patchfile = BUNDLE / 'ws1_gpu_throughput_first.patch'
                 if variant == 1:
                     subprocess.run(['git', 'apply', '-R', str(patchfile)], cwd=root, check=True)
-                    subprocess.run(['git', 'apply', '--check', str(patchfile)], cwd=root, check=True)
-                    subprocess.run(['git', 'apply', str(patchfile)], cwd=root, check=True)
-                subprocess.run(['git', 'apply', '--check', str(BUNDLE / 'ws1_t1_hybrid.patch')], cwd=root, check=True)
-                subprocess.run(['git', 'apply', str(BUNDLE / 'ws1_t1_hybrid.patch')], cwd=root, check=True)
-                self.assertIn('cpu_fallback=True', (root / deploy.FILES[0]).read_text())
+                deploy.patch_snakefile(root / deploy.FILES[0])
+                include = '--include=' + deploy.FILES[1]
+                subprocess.run(['git', 'apply', '--check', include,
+                                str(BUNDLE / 'ws1_t1_hybrid.patch')], cwd=root, check=True)
+                subprocess.run(['git', 'apply', include,
+                                str(BUNDLE / 'ws1_t1_hybrid.patch')], cwd=root, check=True)
+                snake = (root / deploy.FILES[0]).read_text()
+                self.assertIn('cpu_fallback=True', snake)
+                self.assertIn('gpu=GPU_SLOTS_PER_DEVICE if PROFILE == "gpu" else 0', snake)
+                self.assertEqual(deploy.text_digest(root / deploy.FILES[1]),
+                                 json.loads((BUNDLE / 'ws1_t1_hybrid_manifest.json').read_text())['new_pool_sha256'])
+
+    def test_observed_ws1_snakefile_hash_is_allowlisted(self):
+        manifest = json.loads((BUNDLE / 'ws1_t1_hybrid_manifest.json').read_text())
+        self.assertIn('f29d004d86a1d27859272b6326f98ffd2b26a576c8608aa7232595c084e4b437',
+                      manifest['old_snake_sha256'])
+
+    def test_semantic_snakefile_patch_rejects_unknown_t1_context(self):
+        if not os.environ.get('HYBRID_SOURCE_ROOT'):
+            self.skipTest('set HYBRID_SOURCE_ROOT to patched simulation')
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self.make_fixture(root)
+            snake = root / deploy.FILES[0]
+            snake.write_text(snake.read_text().replace(
+                'gpu=1 if PROFILE == "gpu" else 0\n    threads: CPU_HEAVY_THREADS',
+                'gpu=99\n    threads: CPU_HEAVY_THREADS'))
+            with self.assertRaisesRegex(RuntimeError, 'T1调度令牌'):
+                deploy.patch_snakefile(snake)
 
     def test_validation_failure_restores_source_without_restart(self):
         if not os.environ.get('HYBRID_SOURCE_ROOT'):

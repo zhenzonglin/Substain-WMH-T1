@@ -31,6 +31,10 @@ def digest(path):
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
+def text_digest(path):
+    return hashlib.sha256(path.read_text(encoding='utf-8').encode('utf-8')).hexdigest()
+
+
 def safe(path, base, must_exist=True):
     """Reject links in every component, not just the leaf; never traverse during moves."""
     relative = path.relative_to(base)
@@ -184,6 +188,74 @@ def check_source(root):
     return snake, pool
 
 
+def replace_once(text, old, new, label):
+    require(text.count(old) == 1, '{}上下文数量不是1'.format(label))
+    return text.replace(old, new, 1)
+
+
+def patch_snakefile(path):
+    """按已核验的语义片段更新Snakefile，避免补丁被无关行偏移或注释差异阻断。"""
+    raw = path.read_bytes()
+    require(not raw.startswith(b'\xef\xbb\xbf'), 'Snakefile含BOM')
+    eol = '\r\n' if b'\r\n' in raw else '\n'
+    text = raw.decode('utf-8').replace('\r\n', '\n')
+    require('\r' not in text, 'Snakefile含混合换行符')
+    replacements = (
+        ('def gpu_prefix(slots_required):',
+         'def gpu_prefix(slots_required, cpu_fallback=False):', 'gpu_prefix定义'),
+        ('        "-- /usr/bin/env PYTHONPATH={root}/src "',
+         '        "{fallback}-- /usr/bin/env PYTHONPATH={root}/src "', '包装器fallback参数'),
+        ('        slots_required=slots_required,\n    )',
+         '        slots_required=slots_required,\n        fallback="--cpu-fallback " if cpu_fallback else "",\n    )',
+         '包装器fallback格式化'),
+        ('def execution_command(python, command, needs_gpu=False, gpu_slots_required=1):',
+         'def execution_command(python, command, needs_gpu=False, gpu_slots_required=1, cpu_fallback=False):',
+         'execution_command定义'),
+        ('        return gpu_prefix(gpu_slots_required) + "{} {}".format(python, command)',
+         '        return gpu_prefix(gpu_slots_required, cpu_fallback) + "{} {}".format(python, command)',
+         'execution_command调用'),
+    )
+    for old, new, label in replacements:
+        text = replace_once(text, old, new, label)
+
+    def transform_rule(source, name, transform):
+        match = re.search(r'^rule {}:\n.*?(?=^rule |\Z)'.format(name), source, re.M | re.S)
+        require(match, '缺少规则: ' + name)
+        body = transform(match.group())
+        return source[:match.start()] + body + source[match.end():]
+
+    def transform_wmh(body):
+        old = '        gpu=1 if PROFILE == "gpu" else 0,'
+        new = '        gpu=GPU_SLOTS_PER_DEVICE if PROFILE == "gpu" else 0,'
+        if old in body:
+            body = replace_once(body, old, new, 'WMH调度令牌')
+        else:
+            require(body.count(new) == 1, 'WMH调度令牌不是已知的1槽或2槽版本')
+        require(body.count('wmh_exclusive=1 if PROFILE == "gpu" else 0') == 1,
+                'WMH独占资源上下文不匹配')
+        require(body.count('gpu_slots_required=GPU_SLOTS_PER_DEVICE') == 1,
+                'WMH物理双槽上下文不匹配')
+        return body
+
+    def transform_t1(body):
+        body = replace_once(body, '        gpu=1 if PROFILE == "gpu" else 0\n',
+                            '        gpu=0\n', 'T1调度令牌')
+        body = replace_once(body, 'needs_gpu=True))', 'needs_gpu=True, cpu_fallback=True))',
+                            'T1 CPU回退入口')
+        require(body.count('threads: CPU_HEAVY_THREADS') == 1, 'T1四线程声明上下文不匹配')
+        return body
+
+    text = transform_rule(text, 'wmh_segmentation', transform_wmh)
+    text = transform_rule(text, 't1', transform_t1)
+    old_comment = '# 06 T1 GPU共享队列：每例占一个槽位；工作站1配置两槽，因此最多并行两例。'
+    if old_comment in text:
+        text = replace_once(text, old_comment,
+                            '# 06 T1启动时尝试GPU0一槽；槽忙或WMH已进入准入区则立即CPU，不中途切换。',
+                            'T1规则注释')
+    path.write_bytes(text.replace('\n', eol).encode('utf-8'))
+    return text
+
+
 def main():
     require(len(sys.argv) == 2 and Path(sys.argv[1]) == ROOT and ROOT.resolve() == ROOT,
             '只允许工作站1固定活动根目录')
@@ -191,14 +263,18 @@ def main():
     run(['sha256sum', '-c', str(bundle / 'SHA256SUMS')], bundle)
     manifest = json.loads((bundle / 'ws1_t1_hybrid_manifest.json').read_text())
     snake, pool = check_source(root)
-    if hashlib.sha256(pool.encode()).hexdigest() == manifest['new_pool_sha256'] and 'cpu_fallback=True' in snake:
+    if text_digest(root / FILES[1]) == manifest['new_pool_sha256'] and 'cpu_fallback=True' in snake:
         t1 = re.search(r'^rule t1:\n.*?(?=^rule |\Z)', snake, re.M | re.S).group()
         wmh = re.search(r'^rule wmh_segmentation:\n.*?(?=^rule |\Z)', snake, re.M | re.S).group()
         require('gpu=0' in t1 and 'gpu=GPU_SLOTS_PER_DEVICE if PROFILE == "gpu" else 0' in wmh,
                 'GPU锁已更新，但Snakefile不是已知的混合设备版本')
         print('混合设备补丁已经存在；未重复停止或重启。请检查当前PID及GPU_DISPATCH日志。')
         return
-    require(hashlib.sha256(pool.encode()).hexdigest() == manifest['old_pool_sha256'], '未知GPU锁模块：停止前中止')
+    require(text_digest(root / FILES[1]) == manifest['old_pool_sha256'], '未知GPU锁模块：停止前中止')
+    known_snake = (digest(root / FILES[0]) in manifest['old_snake_sha256'] or
+                   text_digest(root / FILES[0]) in manifest['old_snake_text_sha256'])
+    require(known_snake,
+            '未知Snakefile版本：停止前中止；实际SHA256=' + digest(root / FILES[0]))
     config_path = safe(root / 'config/config.yaml', root)
     config = yaml.safe_load(config_path.read_text())
     deriv = (root / config['derivatives']).resolve()
@@ -230,12 +306,14 @@ def main():
             (staged / rel).parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(root / rel, staged / rel)
         run(['git', 'init', '-q'], staged)
-        wmh = re.search(r'^rule wmh_segmentation:\n.*?(?=^rule |\Z)', snake, re.M | re.S).group()
-        if 'gpu=1 if PROFILE == "gpu" else 0' in wmh:
-            run(['git', 'apply', '--check', str(bundle / 'ws1_gpu_throughput_first.patch')], staged)
-            run(['git', 'apply', str(bundle / 'ws1_gpu_throughput_first.patch')], staged)
-        run(['git', 'apply', '--check', '--whitespace=error', str(bundle / 'ws1_t1_hybrid.patch')], staged)
-        run(['git', 'apply', '--whitespace=error', str(bundle / 'ws1_t1_hybrid.patch')], staged)
+        patch_snakefile(staged / FILES[0])
+        pool_include = '--include={}'.format(FILES[1])
+        run(['git', 'apply', '--check', '--whitespace=error', pool_include,
+             str(bundle / 'ws1_t1_hybrid.patch')], staged)
+        run(['git', 'apply', '--whitespace=error', pool_include,
+             str(bundle / 'ws1_t1_hybrid.patch')], staged)
+        require(text_digest(staged / FILES[1]) == manifest['new_pool_sha256'],
+                'GPU锁模块应用后校验值不匹配')
         compile((staged / FILES[1]).read_text(), FILES[1], 'exec')
         run([core, bundle / 'verify_ws1_t1_hybrid.py', staged], root, timeout=90)
         for rel in ('scripts/start_ws1_v1_0_9.sh', 'scripts/finish_ws1_v1_0_9.sh'):

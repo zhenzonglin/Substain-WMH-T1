@@ -25,6 +25,8 @@ bash deploy_ws1_t1_hybrid.sh /data/usersdir/linzhenzong/Substain
 
 `ws1_t1_hybrid.patch`只修改`workflow/Snakefile`和`src/substain_features/gpu_pool.py`。部署器支持此前WMH令牌为1或2的两个已知双槽版本；未知GPU锁源码或补丁上下文会在停止分析前中止。Python可为合法的虚拟环境软链接。
 
+2026-09-05兼容修正：工作站实测`Snakefile`校验值`f29d004d...`的算法内容正确，但统一diff因局部文本上下文差异不能应用。部署器现在先核对该完整校验值，再对GPU包装器、WMH和T1三个已知片段逐项做唯一匹配的语义修改；任何片段缺失或重复仍会在停止分析前中止。GPU锁模块继续使用最小diff且校验应用前后哈希。
+
 部署器核对实际derivatives、96核/4线程/200例设置及PID/PGID/cwd/启动参数，备份两个源码文件与活动阶段，只发TERM并等最多60秒。只有状态在本次停止时间内新写入、且明确含SIGTERM/退出143等标记的失败才归档；有效完成结果和历史失败保留。不能确认的新失败会阻止重启，等待人工检查。为本次中断且缺失的输出清理对应Snakemake元数据，不全局重置状态。
 
 编译、Shell检查、Snakemake解析及解锁通过后，恢复原分析入口。验证失败恢复源码并保持停止；重启后的运行错误只报告，不在活动进程下覆盖源码。归档位置输出为`archive/t1-hybrid-*`，其中`before/`可恢复原两个文件；恢复前必须先停止并核验项目进程。
