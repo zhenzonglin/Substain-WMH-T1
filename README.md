@@ -29,6 +29,15 @@ bash deploy_ws1_t1_hybrid.sh /data/usersdir/linzhenzong/Substain
 
 部署器核对实际derivatives、96核/4线程/200例设置及PID/PGID/cwd/启动参数，备份两个源码文件与活动阶段，只发TERM并等最多60秒。只有状态在本次停止时间内新写入、且明确含SIGTERM/退出143等标记的失败才归档；有效完成结果和历史失败保留。不能确认的新失败会阻止重启，等待人工检查。为本次中断且缺失的输出清理对应Snakemake元数据，不全局重置状态。
 
+若部署器报告“TERM后60秒仍有活动进程”，先确认输出中的旧PID和PGID均已退出、且本项目没有分析进程，再从它输出的同一个归档续部署；不要重新执行首次部署，也不要使用KILL：
+
+```bash
+bash deploy_ws1_t1_hybrid.sh /data/usersdir/linzhenzong/Substain \
+  --resume /data/usersdir/linzhenzong/Substain/archive/t1-hybrid-XXXXXX
+```
+
+续部署会重新校验陈旧PID文件、旧PID/PGID、项目进程、源码、归档备份和derivatives路径。任一项改变都会在覆盖源码前中止；校验通过后才归档可确认由该次TERM产生的失败状态、应用补丁、验证、解锁并重启。
+
 编译、Shell检查、Snakemake解析及解锁通过后，恢复原分析入口。验证失败恢复源码并保持停止；重启后的运行错误只报告，不在活动进程下覆盖源码。归档位置输出为`archive/t1-hybrid-*`，其中`before/`可恢复原两个文件；恢复前必须先停止并核验项目进程。
 
 ### 验证和观察

@@ -212,6 +212,122 @@ class DeployTests(unittest.TestCase):
             for rel in deploy.FILES:
                 self.assertEqual((root / rel).read_bytes(), before[rel])
 
+    def test_timeout_archive_can_resume_only_after_group_exits(self):
+        if not os.environ.get('HYBRID_SOURCE_ROOT'):
+            self.skipTest('set HYBRID_SOURCE_ROOT to patched simulation')
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self.make_fixture(root)
+            leader = dict(pid=99999999, pgid=99999999, birth='test')
+            (root / 'logs').mkdir()
+            (root / 'logs/full_run_v1.0.9.pid').write_text(str(leader['pid']))
+            archive = root / 'archive/t1-hybrid-resume1'
+            for rel in deploy.FILES:
+                destination = archive / 'before' / rel
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                destination.write_bytes((root / rel).read_bytes())
+            snapshot = dict(leader=leader, active={}, stopped_at=100,
+                            derivatives=str(root / 'derivatives/substain_features'),
+                            source_sha256={rel: deploy.digest(root / rel) for rel in deploy.FILES})
+            (archive / 'before.json').write_text(json.dumps(snapshot))
+            with patch.object(deploy, 'process', return_value=None), \
+                 patch.object(deploy, 'group', return_value=[]), \
+                 patch.object(deploy, 'project_analysis_processes', return_value=[]):
+                actual_archive, actual_snapshot = deploy.load_resume_snapshot(root, str(archive))
+            self.assertEqual(actual_archive, archive)
+            self.assertEqual(actual_snapshot['leader'], leader)
+
+            with patch.object(deploy, 'process', return_value=leader), \
+                 patch.object(deploy, 'group', return_value=[leader]), \
+                 patch.object(deploy, 'project_analysis_processes', return_value=[]):
+                with self.assertRaisesRegex(RuntimeError, '仍存在'):
+                    deploy.load_resume_snapshot(root, str(archive))
+
+    def test_resume_rejects_source_change_and_completed_archive(self):
+        if not os.environ.get('HYBRID_SOURCE_ROOT'):
+            self.skipTest('set HYBRID_SOURCE_ROOT to patched simulation')
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self.make_fixture(root)
+            leader = dict(pid=99999999, pgid=99999999, birth='test')
+            (root / 'logs').mkdir()
+            (root / 'logs/full_run_v1.0.9.pid').write_text(str(leader['pid']))
+            archive = root / 'archive/t1-hybrid-resume2'
+            for rel in deploy.FILES:
+                destination = archive / 'before' / rel
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                destination.write_bytes((root / rel).read_bytes())
+            snapshot = dict(leader=leader, active={}, stopped_at=100,
+                            derivatives=str(root / 'derivatives/substain_features'),
+                            source_sha256={rel: deploy.digest(root / rel) for rel in deploy.FILES})
+            (archive / 'before.json').write_text(json.dumps(snapshot))
+            with (root / deploy.FILES[0]).open('a') as handle:
+                handle.write('\n# changed after stop\n')
+            with patch.object(deploy, 'process', return_value=None), \
+                 patch.object(deploy, 'group', return_value=[]), \
+                 patch.object(deploy, 'project_analysis_processes', return_value=[]):
+                with self.assertRaisesRegex(RuntimeError, '源码已变化'):
+                    deploy.load_resume_snapshot(root, str(archive))
+            (archive / 'deployment.json').write_text('{}')
+            with self.assertRaisesRegex(RuntimeError, '已经完成部署'):
+                deploy.load_resume_snapshot(root, str(archive))
+
+    def test_resume_applies_validates_and_restarts_without_another_term(self):
+        if not os.environ.get('HYBRID_SOURCE_ROOT'):
+            self.skipTest('set HYBRID_SOURCE_ROOT to patched simulation')
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self.make_fixture(root)
+            old_leader = dict(pid=99999991, pgid=99999991, birth='old', args=[])
+            new_leader = dict(pid=99999992, pgid=99999992, birth='new', args=[])
+            member = dict(args=['snakemake', 'gpu_devices=0', 'rolling_window=200',
+                                'gpu_slots_per_device=2', 'profile=gpu'])
+            (root / 'logs').mkdir()
+            (root / 'logs/full_run_v1.0.9.pid').write_text(str(old_leader['pid']))
+            archive = root / 'archive/t1-hybrid-resume3'
+            for rel in deploy.FILES:
+                destination = archive / 'before' / rel
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                destination.write_bytes((root / rel).read_bytes())
+            snapshot = dict(leader=old_leader, active={}, stopped_at=100,
+                            derivatives=str(root / 'derivatives/substain_features'),
+                            source_sha256={rel: deploy.digest(root / rel) for rel in deploy.FILES})
+            (archive / 'before.json').write_text(json.dumps(snapshot))
+            state, calls = dict(restarted=False), []
+
+            def fake_process(pid):
+                return new_leader if state['restarted'] and pid == new_leader['pid'] else None
+
+            def fake_group(pgid):
+                return [member] if state['restarted'] and pgid == new_leader['pgid'] else []
+
+            def fake_run(args, cwd, log=None, timeout=120):
+                args = [str(a) for a in args]
+                calls.append(args)
+                if args[0] == 'git':
+                    subprocess.run(args, cwd=cwd, check=True, capture_output=True)
+                if args[0] == 'bash' and len(args) == 2:
+                    state['restarted'] = True
+                    (root / 'logs/full_run_v1.0.9.pid').write_text(str(new_leader['pid']))
+                    logpath = root / 'logs/new.log'
+                    logpath.write_text('gpu_slots=2\n')
+                    (root / 'logs/full_run_v1.0.9.logpath').write_text(str(logpath))
+                return ''
+
+            argv = ['deploy', str(root), '--resume', str(archive)]
+            with patch.object(deploy, 'ROOT', root), patch.object(deploy.sys, 'argv', argv), \
+                 patch.object(deploy, 'process', side_effect=fake_process), \
+                 patch.object(deploy, 'group', side_effect=fake_group), \
+                 patch.object(deploy, 'project_analysis_processes', return_value=[]), \
+                 patch.object(deploy, 'validate_leader', return_value=new_leader), \
+                 patch.object(deploy, 'run', side_effect=fake_run), \
+                 patch.object(deploy.os, 'killpg', create=True) as kill:
+                deploy.main()
+                kill.assert_not_called()
+            self.assertTrue(state['restarted'])
+            self.assertTrue((archive / 'deployment.json').is_file())
+            self.assertIn('cpu_fallback=True', (root / deploy.FILES[0]).read_text())
+
     def test_success_restarts_only_after_validation(self):
         if not os.environ.get('HYBRID_SOURCE_ROOT'):
             self.skipTest('set HYBRID_SOURCE_ROOT to patched simulation')

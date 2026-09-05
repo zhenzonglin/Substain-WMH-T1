@@ -97,6 +97,24 @@ def project_workers(root):
     return result
 
 
+def project_analysis_processes(root):
+    """Find this project's schedulers/workers while excluding this deployer."""
+    result = []
+    for item in Path('/proc').iterdir():
+        if not item.name.isdigit():
+            continue
+        info = process(int(item.name))
+        if not info or info['pid'] == os.getpid() or info['uid'] != os.getuid() or info['state'] == 'Z':
+            continue
+        text = ' '.join(info['args'])
+        if str(root) + '/' in text and any(name in text for name in (
+                'finish_ws1_v1_0_9.sh', 'snakemake', 'substain_features.cli stage',
+                'substain_features.gpu_pool', 'antsRegistration', 'NiChart_DLMUSE',
+                '/DLMUSE ', 'wmh_synthseg_inference.py')):
+            result.append(info)
+    return result
+
+
 def validate_leader(root):
     pointer = safe(root / 'logs/full_run_v1.0.9.pid', root)
     value = pointer.read_text().strip()
@@ -108,6 +126,40 @@ def validate_leader(root):
     require(info['cwd'] == str(root) and info['args'][-2:] == [expected, '96'],
             '拒绝停止：主进程cwd/入口/96核参数不匹配: ' + str(info))
     return info
+
+
+def load_resume_snapshot(root, archive_arg):
+    """Validate a timeout archive after the recorded process group has exited."""
+    archive = safe(Path(archive_arg), root, False)
+    require(archive.parent == root / 'archive' and re.fullmatch(r't1-hybrid-[A-Za-z0-9_-]+', archive.name),
+            '续部署归档不在固定archive目录')
+    require(archive.is_dir() and not archive.is_symlink(), '续部署归档不存在或不是普通目录')
+    require(not (archive / 'deployment.json').exists(), '该归档已经完成部署，不得重复续部署')
+    before_path = safe(archive / 'before.json', archive)
+    snapshot = json.loads(before_path.read_text())
+    require(set(('leader', 'active', 'stopped_at', 'derivatives', 'source_sha256')) <= set(snapshot),
+            '续部署归档缺少必要字段')
+    leader = snapshot['leader']
+    require(isinstance(leader, dict) and all(isinstance(leader.get(key), int) for key in ('pid', 'pgid')),
+            '续部署归档的PID/PGID无效')
+    require(leader['pid'] == leader['pgid'], '续部署归档的PID/PGID不匹配')
+    pointer = safe(root / 'logs/full_run_v1.0.9.pid', root).read_text().strip()
+    require(pointer == str(leader['pid']), 'PID文件已变化，拒绝使用旧归档续部署')
+    require(process(leader['pid']) is None and not group(leader['pgid']),
+            '归档记录的旧PID或进程组仍存在，拒绝续部署')
+    require(not project_analysis_processes(root), '仍有本项目分析进程，拒绝续部署')
+    require(Path(snapshot['derivatives']) == root / 'derivatives/substain_features',
+            '续部署归档的derivatives路径不匹配')
+    require(isinstance(snapshot['active'], dict) and isinstance(snapshot['stopped_at'], (int, float)),
+            '续部署归档的活动状态或停止时间无效')
+    require(isinstance(snapshot['source_sha256'], dict), '续部署归档缺少源码校验值')
+    for rel in FILES:
+        require(snapshot['source_sha256'].get(rel) == digest(safe(root / rel, root)),
+                '停止后源码已变化，拒绝续部署: ' + rel)
+        archived = safe(archive / 'before' / rel, archive)
+        require(digest(archived) == snapshot['source_sha256'][rel],
+                '归档备份校验失败: ' + rel)
+    return archive, snapshot
 
 
 def active_snapshot(members, deriv):
@@ -257,8 +309,12 @@ def patch_snakefile(path):
 
 
 def main():
-    require(len(sys.argv) == 2 and Path(sys.argv[1]) == ROOT and ROOT.resolve() == ROOT,
+    require(len(sys.argv) in (2, 4) and Path(sys.argv[1]) == ROOT and ROOT.resolve() == ROOT,
             '只允许工作站1固定活动根目录')
+    resume_archive = None
+    if len(sys.argv) == 4:
+        require(sys.argv[2] == '--resume', '续部署参数必须为--resume和归档路径')
+        resume_archive = sys.argv[3]
     root, bundle = ROOT, Path(__file__).resolve().parent
     run(['sha256sum', '-c', str(bundle / 'SHA256SUMS')], bundle)
     manifest = json.loads((bundle / 'ws1_t1_hybrid_manifest.json').read_text())
@@ -293,12 +349,17 @@ def main():
                          ('wmh_python', 'envs/wmh/bin/python')):
         require(root / execution.get(key, default) == root / default, '非预期分析环境路径: ' + key)
         require((root / default).is_file() and os.access(root / default, os.X_OK), 'Python软链接无效或不可执行')
-    leader = validate_leader(root)
-    members = group(leader['pgid'])
-    require(all(worker['pgid'] == leader['pgid'] for worker in project_workers(root)),
-            '发现主分析进程组之外的本项目分析进程，停止前中止')
-    require(any('snakemake' in m['args'] and 'gpu_devices=0' in m['args'] and 'rolling_window=200' in m['args']
-                and 'gpu_slots_per_device=2' in m['args'] for m in members), '未找到预期的活动滚动GPU0 Snakemake命令')
+    if resume_archive is None:
+        leader = validate_leader(root)
+        members = group(leader['pgid'])
+        require(all(worker['pgid'] == leader['pgid'] for worker in project_workers(root)),
+                '发现主分析进程组之外的本项目分析进程，停止前中止')
+        require(any('snakemake' in m['args'] and 'gpu_devices=0' in m['args'] and 'rolling_window=200' in m['args']
+                    and 'gpu_slots_per_device=2' in m['args'] for m in members), '未找到预期的活动滚动GPU0 Snakemake命令')
+        archive = snapshot = None
+    else:
+        archive, snapshot = load_resume_snapshot(root, resume_archive)
+        leader, members = None, []
     # Stage both known variants without touching live files or stopping analysis.
     with tempfile.TemporaryDirectory(prefix='ws1-hybrid-stage-') as temporary:
         staged = Path(temporary)
@@ -318,29 +379,35 @@ def main():
         run([core, bundle / 'verify_ws1_t1_hybrid.py', staged], root, timeout=90)
         for rel in ('scripts/start_ws1_v1_0_9.sh', 'scripts/finish_ws1_v1_0_9.sh'):
             run(['bash', '-n', root / rel], root)
-        require(identity(validate_leader(root)) == identity(leader), '预检查期间主进程身份发生变化')
-        archive_base = root / 'archive'
-        safe(archive_base, root, False)
-        archive_base.mkdir(exist_ok=True)
-        archive = Path(tempfile.mkdtemp(prefix='t1-hybrid-', dir=str(archive_base)))
-        for rel in FILES:
-            destination = archive / 'before' / rel
-            destination.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(root / rel, destination)
-        active = active_snapshot(group(leader['pgid']), deriv)
-        stopped_at = time.time()
-        snapshot = dict(leader=leader, active=active, stopped_at=stopped_at, derivatives=str(deriv),
-                        source_sha256={rel: digest(root / rel) for rel in FILES})
-        (archive / 'before.json').write_text(json.dumps(snapshot, ensure_ascii=False, indent=2))
-        print('上下文检查通过。根目录={}；derivatives={}；归档={}'.format(root, deriv, archive), flush=True)
-        require(identity(validate_leader(root)) == identity(leader), '发送TERM前进程身份发生变化')
-        os.killpg(leader['pgid'], signal.SIGTERM)
-        deadline = time.monotonic() + 60
-        while group(leader['pgid']) and time.monotonic() < deadline:
-            time.sleep(.5)
-        require(not group(leader['pgid']), 'TERM后60秒仍有活动进程；不使用KILL、未修改源码: ' + str(archive))
-        require(not project_workers(root), '发现残留本项目分析进程；未修改源码、不使用KILL')
-        ended_at = time.time()
+        if resume_archive is None:
+            require(identity(validate_leader(root)) == identity(leader), '预检查期间主进程身份发生变化')
+            archive_base = root / 'archive'
+            safe(archive_base, root, False)
+            archive_base.mkdir(exist_ok=True)
+            archive = Path(tempfile.mkdtemp(prefix='t1-hybrid-', dir=str(archive_base)))
+            for rel in FILES:
+                destination = archive / 'before' / rel
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(root / rel, destination)
+            active = active_snapshot(group(leader['pgid']), deriv)
+            stopped_at = time.time()
+            snapshot = dict(leader=leader, active=active, stopped_at=stopped_at, derivatives=str(deriv),
+                            source_sha256={rel: digest(root / rel) for rel in FILES})
+            (archive / 'before.json').write_text(json.dumps(snapshot, ensure_ascii=False, indent=2))
+            print('上下文检查通过。根目录={}；derivatives={}；归档={}'.format(root, deriv, archive), flush=True)
+            require(identity(validate_leader(root)) == identity(leader), '发送TERM前进程身份发生变化')
+            os.killpg(leader['pgid'], signal.SIGTERM)
+            deadline = time.monotonic() + 60
+            while group(leader['pgid']) and time.monotonic() < deadline:
+                time.sleep(.5)
+            require(not group(leader['pgid']), 'TERM后60秒仍有活动进程；不使用KILL、未修改源码: ' + str(archive))
+            require(not project_workers(root), '发现残留本项目分析进程；未修改源码、不使用KILL')
+            ended_at = time.time()
+        else:
+            active = snapshot['active']
+            stopped_at = float(snapshot['stopped_at'])
+            ended_at = time.time()
+            print('续部署检查通过。旧PID/PGID已退出；源码及归档校验一致；归档={}'.format(archive), flush=True)
         archive_interrupted(active, deriv, archive, stopped_at, ended_at)
         sm = [core, '-m', 'snakemake', '--snakefile', root / 'workflow/Snakefile', '--configfile', config_path]
         cfg = ['--config', 'active_config_file=' + str(config_path), 'selected_participant=all',
