@@ -176,3 +176,36 @@ python compare_t1_cpu_gpu_runtime.py \
 ```
 
 工具读取每例`status_history.jsonl`，按`effective_device`分类。主比较只使用成功、完整、未复用、未从DLICV断点恢复的T1运行，并保存明细TSV和汇总JSON到项目`logs/`。
+
+## 打包第二工作站分析流程（不含结果）
+
+`package_ws1_analysis_project.py`直接读取工作站1的活动项目，但不修改项目文件，也不会停止当前分析。它保留当前源码、工作流、配置模板、测试、模型、模板、第三方工具、wheel和`envs/offline`中的可迁移环境归档。
+
+脚本明确排除：
+
+- `BIDS/`、`Lesion/`和`inputs/`原始输入；
+- `derivatives/`、QC、状态、第一队列日志和历史`archive/`；
+- `config/participants.tsv`、`config/metadata.tsv`及PID文件；
+- `.git/`、Snakemake/pytest/ruff缓存和绑定当前机器路径的活动环境。
+
+先只检查范围、离线环境校验值和预计大小：
+
+```bash
+cd /data/usersdir/linzhenzong/Substain-ws1-rolling-patch-lite
+python3 package_ws1_analysis_project.py \
+  --project-root /data/usersdir/linzhenzong/Substain \
+  --output-parent /迁移盘/目录 \
+  --dry-run
+```
+
+确认输出目录空间充足后正式生成：
+
+```bash
+python3 package_ws1_analysis_project.py \
+  --project-root /data/usersdir/linzhenzong/Substain \
+  --output-parent /迁移盘/目录
+```
+
+输出为一个时间戳目录`Substain-analysis-workflow-YYYYMMDDTHHMMSSZ/`，其中包含压缩包、`SHA256SUMS`、逐文件`FILES.sha256`、成员清单、源文件清单、排除规则、验证JSON和目标工作站恢复说明。脚本会在压缩后逐成员重新计算哈希，并检查打包过程中源码/资源没有变化；任何原始输入、结果或第一队列清单进入包中都会使任务失败。
+
+第二工作站解压并恢复环境后，必须重新生成第二队列的`config/participants.tsv`和`config/metadata.tsv`；脚本不会自动启动第二队列。
