@@ -36,6 +36,30 @@ def make_project(parent: Path) -> Path:
 
 
 class PackageWorkflowTests(unittest.TestCase):
+    def test_dry_run_reports_fixed_paths_without_writing(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary)
+            root = make_project(base)
+
+            report = package.build_bundle(root, base, dry_run=True)
+
+            self.assertEqual(report["archive_path"], str(base.resolve() / "Substain_GB.tar.gz"))
+            self.assertEqual(report["checksum_path"], str(base.resolve() / "Substain_GB.tar.gz.sha256"))
+            self.assertEqual(report["bundle_path"], str(base.resolve() / "Substain_GB_manifest"))
+            self.assertEqual(list(base.iterdir()), [root])
+
+    def test_existing_archive_is_preserved(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary)
+            root = make_project(base)
+            archive = base / "Substain_GB.tar.gz"
+            archive.write_bytes(b"existing archive")
+
+            with self.assertRaises(package.PackagingError):
+                package.build_bundle(root, base)
+
+            self.assertEqual(archive.read_bytes(), b"existing archive")
+
     def test_collect_excludes_results_inputs_manifests_and_runtime_state(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = make_project(Path(temporary))
@@ -93,6 +117,12 @@ class PackageWorkflowTests(unittest.TestCase):
 
             self.assertEqual(report["status"], "pass")
             bundle = Path(str(report["bundle_path"]))
+            archive = Path(str(report["archive_path"]))
+            checksum = Path(str(report["checksum_path"]))
+            self.assertEqual(archive, output.resolve() / "Substain_GB.tar.gz")
+            self.assertEqual(bundle, output.resolve() / "Substain_GB_manifest")
+            self.assertEqual(checksum.read_text(encoding="utf-8"), f"{digest(archive.read_bytes())}  Substain_GB.tar.gz\n")
+            self.assertFalse((bundle / "Substain_GB.tar.gz").exists())
             verification = json.loads((bundle / "VERIFICATION.json").read_text(encoding="utf-8"))
             contents = set((bundle / "CONTENTS.txt").read_text(encoding="utf-8").splitlines())
             self.assertEqual(verification["status"], "pass")

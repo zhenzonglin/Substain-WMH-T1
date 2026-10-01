@@ -27,6 +27,8 @@ from typing import Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
 PROJECT_NAME = "Substain"
 DEFAULT_PROJECT_ROOT = Path("/data/usersdir/linzhenzong/Substain")
+DEFAULT_OUTPUT_PARENT = DEFAULT_PROJECT_ROOT.parent
+BUNDLE_NAME = "Substain_GB"
 ONE_GIB = 1024 ** 3
 
 # These contain source data, first-queue identifiers, analysis results, logs or
@@ -451,34 +453,21 @@ def _verify_members(actual: Sequence[str], expected: Sequence[str]) -> Dict[str,
 
 def _write_readme(path: Path, archive_name: str) -> None:
     path.write_text(
-        f"""Substain 第二工作站分析流程迁移包
+        f"""Substain_GB 分析流程迁移包
 
 本包只包含分析流程、配置模板、测试、模型、模板、第三方工具、wheel和可迁移环境归档。
 不包含原始BIDS/Lesion、第一队列participants/metadata、derivatives结果、QC、日志、状态、历史archive或活动虚拟环境。
 
-目标工作站操作：
+本次只执行压缩与校验。迁移完成后再确定新工作站的解压位置、路径配置和第二队列输入。
+压缩包内部顶层目录仍为Substain，现有源码和配置内容按原样保留。
 
-1. 在本目录校验压缩包：
-   sha256sum -c SHA256SUMS
+需要转移的文件位于本说明目录的上一级：
+  {archive_name}
+  {archive_name}.sha256
+同时转移本说明所在的Substain_GB_manifest目录，以保留逐文件清单和验证报告。
 
-2. 建立空的目标父目录并解压：
-   mkdir -p /目标父目录
-   tar -xzf {archive_name} -C /目标父目录
-
-3. 校验解压后的全部普通文件：
-   (cd /目标父目录 && sha256sum -c /本迁移包目录/FILES.sha256)
-
-4. 恢复离线环境并核验：
-   cd /目标父目录/Substain
-   bash scripts/install_offline.sh
-   bash scripts/verify_transferred_project.sh
-
-5. 第二队列开始前，重新生成并核对：
-   config/participants.tsv
-   config/metadata.tsv
-   BIDS/、Lesion/或新的输入挂载
-
-不要从第一工作站复制旧participants.tsv、metadata.tsv、derivatives、logs或PID文件。
+在压缩包所在目录校验：
+  sha256sum -c {archive_name}.sha256
 """,
         encoding="utf-8",
     )
@@ -501,6 +490,14 @@ def build_bundle(project_root: Path, output_parent: Path, dry_run: bool = False)
     if _is_within(output, root) or output == root:
         raise PackagingError(f"输出目录不得位于源项目内部: {output}")
 
+    archive_name = BUNDLE_NAME + ".tar.gz"
+    final_archive = output / archive_name
+    final_checksum = output / (archive_name + ".sha256")
+    final_bundle = output / (BUNDLE_NAME + "_manifest")
+    for target in (final_archive, final_checksum, final_bundle):
+        if target.exists() or target.is_symlink():
+            raise PackagingError(f"目标已存在，拒绝覆盖: {target}")
+
     environment_archives = verify_environment_archives(root)
     entries, excluded_counts = collect_entries(root)
     logical_size = sum(int(entry["size_bytes"]) for entry in entries if entry["kind"] == "file")
@@ -508,6 +505,9 @@ def build_bundle(project_root: Path, output_parent: Path, dry_run: bool = False)
         "status": "dry-run" if dry_run else "building",
         "project_root": str(root),
         "output_parent": str(output),
+        "archive_path": str(final_archive),
+        "checksum_path": str(final_checksum),
+        "bundle_path": str(final_bundle),
         "entry_count": len(entries),
         "regular_file_count": sum(entry["kind"] == "file" for entry in entries),
         "symlink_count": sum(entry["kind"] == "symlink" for entry in entries),
@@ -526,13 +526,7 @@ def build_bundle(project_root: Path, output_parent: Path, dry_run: bool = False)
             f"输出磁盘空间不足；可用={free_bytes}，至少需要={required_free}（入选内容+1GiB余量）"
         )
 
-    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-    bundle_name = f"Substain-analysis-workflow-{stamp}"
-    final_bundle = output / bundle_name
-    if final_bundle.exists():
-        raise PackagingError(f"目标已存在，拒绝覆盖: {final_bundle}")
-    temporary_bundle = Path(tempfile.mkdtemp(prefix="." + bundle_name + ".tmp-", dir=str(output)))
-    archive_name = bundle_name + ".tar.gz"
+    temporary_bundle = Path(tempfile.mkdtemp(prefix="." + BUNDLE_NAME + ".tmp-", dir=str(output)))
     archive = temporary_bundle / archive_name
     try:
         file_list = temporary_bundle / ".archive-members.null"
@@ -560,7 +554,7 @@ def build_bundle(project_root: Path, output_parent: Path, dry_run: bool = False)
             {
                 "status": status,
                 "created_at_utc": datetime.now(timezone.utc).isoformat(),
-                "bundle_name": bundle_name,
+                "bundle_name": BUNDLE_NAME,
                 "archive": archive_name,
                 "archive_size_bytes": archive.stat().st_size,
                 "archive_sha256": archive_sha256,
@@ -578,9 +572,10 @@ def build_bundle(project_root: Path, output_parent: Path, dry_run: bool = False)
         (temporary_bundle / "VERIFICATION.json").write_text(
             json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8"
         )
-        (temporary_bundle / "SHA256SUMS").write_text(
-            f"{archive_sha256}  {archive_name}\n", encoding="utf-8"
-        )
+        checksum_text = f"{archive_sha256}  {archive_name}\n"
+        temporary_checksum = temporary_bundle / (archive_name + ".sha256")
+        temporary_checksum.write_text(checksum_text, encoding="utf-8")
+        (temporary_bundle / "SHA256SUMS").write_text(checksum_text, encoding="utf-8")
         (temporary_bundle / "EXCLUDED_RULES.txt").write_text(
             "\n".join(
                 ["排除目录/前缀:"]
@@ -598,8 +593,13 @@ def build_bundle(project_root: Path, output_parent: Path, dry_run: bool = False)
         file_list.unlink()
         if status != "pass":
             raise PackagingError("归档成员核验失败；见 {}".format(temporary_bundle / "VERIFICATION.json"))
+        # Temporary and final files share a filesystem. Hard-link publication
+        # fails if a target exists, so another invocation cannot be overwritten.
+        os.link(str(archive), str(final_archive))
+        os.link(str(temporary_checksum), str(final_checksum))
+        archive.unlink()
+        temporary_checksum.unlink()
         temporary_bundle.rename(final_bundle)
-        report["bundle_path"] = str(final_bundle)
         return report
     except BaseException:
         print(f"打包失败；源项目未修改。诊断目录保留在 {temporary_bundle}", file=sys.stderr)
@@ -609,7 +609,7 @@ def build_bundle(project_root: Path, output_parent: Path, dry_run: bool = False)
 def parse_args(argv: Sequence[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--project-root", type=Path, default=DEFAULT_PROJECT_ROOT)
-    parser.add_argument("--output-parent", type=Path, required=True)
+    parser.add_argument("--output-parent", type=Path, default=DEFAULT_OUTPUT_PARENT)
     parser.add_argument("--dry-run", action="store_true", help="只检查范围、依赖和预计大小，不创建文件")
     return parser.parse_args(argv)
 
@@ -623,7 +623,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         return 1
     print(json.dumps(report, ensure_ascii=False, indent=2))
     if report["status"] == "pass":
-        print("迁移包生成并验证通过: {}".format(report["bundle_path"]))
+        print("迁移包生成并验证通过: {}".format(report["archive_path"]))
     return 0
 
 

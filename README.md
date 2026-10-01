@@ -179,7 +179,7 @@ python compare_t1_cpu_gpu_runtime.py \
 
 ## 打包第二工作站分析流程（不含结果）
 
-`package_ws1_analysis_project.py`直接读取工作站1的活动项目，但不修改项目文件，也不会停止当前分析。它保留当前源码、工作流、配置模板、测试、模型、模板、第三方工具、wheel和`envs/offline`中的可迁移环境归档。
+`package_ws1_analysis_project.py`直接读取`/data/usersdir/linzhenzong/Substain`，生成`/data/usersdir/linzhenzong/Substain_GB.tar.gz`。它保留当前源码、工作流、配置模板、测试、模型、模板、第三方工具、wheel和`envs/offline`中的可迁移环境归档。
 
 脚本明确排除：
 
@@ -194,7 +194,7 @@ python compare_t1_cpu_gpu_runtime.py \
 cd /data/usersdir/linzhenzong/Substain-ws1-rolling-patch-lite
 python3 package_ws1_analysis_project.py \
   --project-root /data/usersdir/linzhenzong/Substain \
-  --output-parent /迁移盘/目录 \
+  --output-parent /data/usersdir/linzhenzong \
   --dry-run
 ```
 
@@ -203,9 +203,24 @@ python3 package_ws1_analysis_project.py \
 ```bash
 python3 package_ws1_analysis_project.py \
   --project-root /data/usersdir/linzhenzong/Substain \
-  --output-parent /迁移盘/目录
+  --output-parent /data/usersdir/linzhenzong
 ```
 
-输出为一个时间戳目录`Substain-analysis-workflow-YYYYMMDDTHHMMSSZ/`，其中包含压缩包、`SHA256SUMS`、逐文件`FILES.sha256`、成员清单、源文件清单、排除规则、验证JSON和目标工作站恢复说明。脚本会在压缩后逐成员重新计算哈希，并检查打包过程中源码/资源没有变化；任何原始输入、结果或第一队列清单进入包中都会使任务失败。
+以上路径也是脚本的默认值，可直接运行`python3 package_ws1_analysis_project.py`。固定输出为：
 
-第二工作站解压并恢复环境后，必须重新生成第二队列的`config/participants.tsv`和`config/metadata.tsv`；脚本不会自动启动第二队列。
+```text
+/data/usersdir/linzhenzong/Substain_GB.tar.gz
+/data/usersdir/linzhenzong/Substain_GB.tar.gz.sha256
+/data/usersdir/linzhenzong/Substain_GB_manifest/
+```
+
+`Substain_GB_manifest/`包含逐文件`FILES.sha256`、成员清单、源文件清单、排除规则、验证JSON和迁移说明。脚本会在压缩后逐成员重新计算哈希，并检查打包过程中源码/资源没有变化；任何原始输入、结果或第一队列清单进入包中都会使任务失败。已有同名输出时，脚本中止并保留已有文件。
+
+完成后在压缩包所在目录校验：
+
+```bash
+cd /data/usersdir/linzhenzong
+sha256sum -c Substain_GB.tar.gz.sha256
+```
+
+将以上两个文件和`Substain_GB_manifest/`转移到新工作站。本次只压缩转移；新工作站解压位置、路径配置和第二队列输入待迁移完成后处理。压缩包内部顶层目录保持为`Substain/`。
