@@ -75,6 +75,7 @@ class PackageWorkflowTests(unittest.TestCase):
                 ".git/config",
                 ".snakemake/metadata/item",
                 "envs/core-venv/bin/python",
+                "envs/core-venv.failed-no-ensurepip-20260826-145928/pyvenv.cfg",
                 "offline/envs/test/file",
             )
             for relative in excluded_files:
@@ -130,6 +131,31 @@ class PackageWorkflowTests(unittest.TestCase):
             self.assertIn("Substain/envs/offline/wmh-env.tar.gz", contents)
             self.assertNotIn("Substain/config/participants.tsv", contents)
             self.assertFalse(any(member.startswith("Substain/derivatives/") for member in contents))
+
+    @unittest.skipIf(os.name == "nt" or not hasattr(os, "symlink"), "symlink behavior is verified under Linux")
+    def test_failed_environment_subtree_is_excluded_from_archive(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary)
+            root = make_project(base)
+            outside = base / "system-python3"
+            outside.write_bytes(b"external interpreter")
+            failed_env = root / "envs/core-venv.failed-no-ensurepip-20260826-145928"
+            failed_bin = failed_env / "bin"
+            failed_bin.mkdir(parents=True)
+            (failed_env / "pyvenv.cfg").write_text("failed environment", encoding="utf-8")
+            os.symlink(str(outside), str(failed_bin / "python3"))
+            os.symlink("python3", str(failed_bin / "python"))
+
+            report = package.build_bundle(root, base)
+
+            self.assertEqual(report["status"], "pass")
+            bundle = Path(str(report["bundle_path"]))
+            contents = (bundle / "CONTENTS.txt").read_text(encoding="utf-8").splitlines()
+            self.assertFalse(any(member.startswith("Substain/envs/core-venv.failed-") for member in contents))
+            self.assertIn("Substain/envs/offline/t1-env.tar.gz", contents)
+            self.assertEqual(report["excluded_rule_counts"]["runtime-env:envs/core-venv.failed-*"], 1)
+            self.assertEqual(os.readlink(str(failed_bin / "python")), "python3")
+            self.assertEqual(os.readlink(str(failed_bin / "python3")), str(outside))
 
     @unittest.skipIf(os.name == "nt" or not hasattr(os, "symlink"), "symlink behavior is verified under Linux")
     def test_external_symlink_is_rejected(self) -> None:

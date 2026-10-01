@@ -130,6 +130,8 @@ def exclusion_reason(relative: str, is_directory: bool) -> str:
     for prefix in EXCLUDED_PREFIXES:
         if _matches_prefix(relative, prefix):
             return "prefix:" + prefix
+    if relative.startswith("envs/core-venv.failed-"):
+        return "runtime-env:envs/core-venv.failed-*"
     name = PurePosixPath(relative).name
     if is_directory and name in EXCLUDED_DIRECTORY_NAMES:
         return "directory-name:" + name
@@ -138,8 +140,6 @@ def exclusion_reason(relative: str, is_directory: bool) -> str:
             return "file-name:.DS_Store"
         if name.endswith(EXCLUDED_FILE_SUFFIXES):
             return "runtime-suffix:" + next(suffix for suffix in EXCLUDED_FILE_SUFFIXES if name.endswith(suffix))
-        if name.startswith("core-venv.failed-") and relative.startswith("envs/"):
-            return "runtime-env:envs/core-venv.failed-*"
         if name.endswith("_gpu_probe.json") and relative.startswith("envs/"):
             return "runtime-probe:envs/*_gpu_probe.json"
     return ""

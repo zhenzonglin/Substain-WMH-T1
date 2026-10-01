@@ -188,6 +188,8 @@ python compare_t1_cpu_gpu_runtime.py \
 - `config/participants.tsv`、`config/metadata.tsv`及PID文件；
 - `.git/`、Snakemake/pytest/ruff缓存和绑定当前机器路径的活动环境。
 
+`envs/core-venv.failed-*`旧失败环境按整个目录排除，包括其中链接到系统Python的文件；保留`envs/offline/`中的可迁移环境归档。
+
 先只检查范围、离线环境校验值和预计大小：
 
 ```bash
