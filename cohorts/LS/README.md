@@ -17,12 +17,13 @@ bash cohorts/LS/install_LS.sh
 
 如果已有 GB/LS 分析进程、未知源码结构或既有 LS 文件被修改，脚本会停止并报告具体原因，不终止分析、不覆盖人工修改。对相同版本可重复安装。已有 LS 分析运行后，不要直接换版本覆盖；安装器会拒绝不一致的运行代码。仅四个运行 Python 文件和 vendor 依赖进入工作站运行目录；仓库文档、测试及测试夹具不会混入运行指纹。
 
-已有安装因缺少 T1/FLAIR 停在准备阶段时，使用这个轻量更新，只替换输入适配器一个文件：
+已有安装因缺少 T1/FLAIR 或误识别 `PRECISE_Thickness_GMV_QC_results` 目录停在准备阶段时，使用这个轻量更新，只替换输入适配器一个文件（兼容已应用缺模态补丁的版本）：
 
 ```bash
 cd /data02/linzhenzong/Substain_LS_installer
-git pull --ff-only
-bash cohorts/LS/apply_missing_modalities_LS.sh && bash /data02/linzhenzong/Substain_GB/scripts/run_LS.sh
+git pull --ff-only &&
+bash cohorts/LS/apply_missing_modalities_LS.sh &&
+bash /data02/linzhenzong/Substain_GB/scripts/run_LS.sh
 ```
 
 更新器先备份旧脚本和失败报告，不重装环境、模型或配置。它仅适用于后台已退出、尚无参与者名单、冻结记录和阶段结果的准备失败情况；其他情况保留原状态并说明原因。
@@ -101,6 +102,8 @@ bash /data02/linzhenzong/Substain_GB/scripts/resume_LS.sh
 | FLAIR | 受试者目录内唯一 `*T2wFLAIR*.nii.gz` |
 
 影像目录构成待核对名册。缺少 T1 或 FLAIR 者记录后跳过，只有完整配对者进入 `participants_LS.tsv`、metadata 和常模适用性表。排除记录位于 `/data02/linzhenzong/Substain_GB/inputs/cohort_LS/excluded_subjects_LS.tsv`；一人缺两种影像只记一人。`input_report_LS.json` 分别记录全部影像目录人数、实际纳入人数和缺模态排除人数。全部缺模态时会报告无可分析者，不发布空名单。
+
+按用户指定，直接子目录 `PRECISE_Thickness_GMV_QC_results` 不作为被试扫描，内容保持原样，也不计入纳入或缺模态排除人数。跳过记录写入 `input_report_LS.json` 和 `input_issues_LS.tsv`，代码为 `ignored_non_subject_directory`。仅排除这一确切目录名，其他非法 P 开头目录仍报告错误。
 
 临床表额外病例仍保留在完整临床表及双侧匹配报告。重复ID、非法临床字段、损坏影像或多个影像候选仍阻止准备，不自动选择或额外排除。监测器、阶段结果和 `not_exported_LS.tsv` 以实际纳入名单为分母，准备期缺模态者另见上述排除表。
 

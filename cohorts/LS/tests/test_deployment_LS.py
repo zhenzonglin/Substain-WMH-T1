@@ -181,8 +181,13 @@ def test_additional_image_or_changed_source_cannot_reuse_results(installed):
         runner.check_identity(cfg, config_path)
 
 
-def test_missing_p0001_is_recorded_and_old_runner_selects_complete_pilot(installed):
+@pytest.mark.parametrize('with_results_directory', [False, True])
+def test_missing_p0001_is_recorded_and_old_runner_selects_complete_pilot(installed, with_results_directory):
     root, config_path, cfg, before = installed
+    if with_results_directory:
+        results = Path(cfg['ls']['input_root']) / 'PRECISE_Thickness_GMV_QC_results'
+        results.mkdir()
+        (results / 'old_T1w.nii.gz').write_bytes(b'not a participant image')
     (Path(cfg['ls']['input_root']) / 'P0001/source_T1w_run1.nii.gz').unlink()
     runner.prepare(cfg, config_path)
     assert [row['participant_id'] for row in runner.participants(cfg)] == ['P0005']
@@ -191,6 +196,7 @@ def test_missing_p0001_is_recorded_and_old_runner_selects_complete_pilot(install
     assert 'P0001' in exclusions.read_text()
     identity = runner.capture_identity(cfg, config_path)
     assert identity['files'][str(exclusions)] == runner.digest(exclusions)
+    assert runner.check_identity(cfg, config_path)
     assert all(runner.digest(Path(path)) == checksum for path, checksum in before.items())
 
 

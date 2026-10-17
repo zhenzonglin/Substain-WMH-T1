@@ -23,7 +23,8 @@ def state(tmp_path, monkeypatch):
     (source / 'SHA256SUMS_LS').write_text(hashlib.sha256(new).hexdigest() + '  inputs_LS.py\n')
     monkeypatch.setattr(patch, 'HERE', source)
     old = b'# known previous input adapter\n'
-    monkeypatch.setattr(patch, 'PREVIOUS_SHA256', hashlib.sha256(old).hexdigest())
+    monkeypatch.setattr(patch, 'KNOWN_PREVIOUS_SHA256', {
+        hashlib.sha256(old).hexdigest(), hashlib.sha256(b'# previous missing-modality adapter\n').hexdigest()})
     target = root / 'scripts/cohort_LS/inputs_LS.py'
     target.parent.mkdir(parents=True)
     target.write_bytes(old)
@@ -51,6 +52,16 @@ def test_single_module_update_preserves_reports_and_is_idempotent(state):
     mtime = target.stat().st_mtime_ns
     assert patch.apply(root, fake)['status'] == 'already_updated'
     assert target.stat().st_mtime_ns == mtime
+
+
+def test_previously_patched_module_can_upgrade_and_records_actual_hash(state):
+    root, _, fake, target, _, new = state
+    previous = b'# previous missing-modality adapter\n'
+    target.write_bytes(previous)
+    result = patch.apply(root, fake)
+    assert target.read_bytes() == new
+    assert result['before'] == hashlib.sha256(previous).hexdigest()
+    assert (Path(result['backup']) / target.name).read_bytes() == previous
 
 
 @pytest.mark.parametrize('marker', ('participants', 'run_manifest_LS.json', 'audit_guard_LS.json', 'pilot_verification_LS.json', 'status'))

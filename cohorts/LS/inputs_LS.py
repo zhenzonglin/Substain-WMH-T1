@@ -30,6 +30,7 @@ REQUIRED_HEADERS = ("BIGDATA_CODE", "AGE", "SEX")
 PARTICIPANT_COLUMNS = ("participant_id", "age", "sex", "site_id", "t1w", "flair", "lesion_mask")
 METADATA_COLUMNS = PARTICIPANT_COLUMNS[:4]
 ID_PATTERN = re.compile(r"P\d+", re.ASCII)
+IGNORED_DIRECTORY_NAMES = frozenset({"PRECISE_Thickness_GMV_QC_results"})
 MASK_NAME = "healthy_zero_lesion_MNI152_1mm_LS.nii.gz"
 
 
@@ -215,6 +216,9 @@ def _scan_images(root: Path, issues: List[dict]) -> Dict[str, dict]:
         return result
     for directory in sorted(root.iterdir()):
         if not directory.is_dir() or not directory.name.startswith("P"):
+            continue
+        if directory.name in IGNORED_DIRECTORY_NAMES:
+            _issue(issues, "ignored_non_subject_directory", "User-excluded results directory; left unchanged: {}".format(directory), severity="info")
             continue
         participant = directory.name
         if not ID_PATTERN.fullmatch(participant):

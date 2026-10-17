@@ -143,6 +143,45 @@ def test_identical_repeat_does_not_touch_mtime(cohort):
     assert before == after
 
 
+def test_requested_results_directory_is_recorded_without_scanning_or_counting(cohort, monkeypatch):
+    folder = Path(cohort["ls"]["input_root"]) / "PRECISE_Thickness_GMV_QC_results"
+    folder.mkdir()
+    # This would fail NIfTI validation if treated as a participant image.
+    sentinel = folder / "results_T1w.nii.gz"
+    sentinel.write_bytes(b"existing results; do not read or modify")
+    before = (sentinel.read_bytes(), sentinel.stat().st_mtime_ns)
+    original_hash = inputs.sha256
+
+    def checked_hash(path):
+        assert folder not in path.parents
+        return original_hash(path)
+
+    monkeypatch.setattr(inputs, "sha256", checked_hash)
+    report = inputs.prepare_inputs(cohort)
+    assert report["status"] == "pass"
+    assert report["image_subject_count"] == report["participants_count"] == 2
+    assert report["excluded_subject_count"] == 0
+    skipped = [issue for issue in report["issues"] if issue["code"] == "ignored_non_subject_directory"]
+    assert len(skipped) == 1
+    assert skipped[0]["severity"] == "info"
+    assert str(folder) in skipped[0]["message"]
+    prep = Path(cohort["ls"]["preparation_dir"])
+    assert skipped[0] in read_tsv(prep / "input_issues_LS.tsv")
+    for path in (Path(cohort["participants"]), prep / "input_matching_LS.tsv", prep / "excluded_subjects_LS.tsv", prep / "input_manifest_LS.tsv"):
+        assert folder.name not in path.read_text(encoding="utf-8")
+    assert (sentinel.read_bytes(), sentinel.stat().st_mtime_ns) == before
+    published_mtime = Path(cohort["participants"]).stat().st_mtime_ns
+    assert inputs.prepare_inputs(cohort) == report
+    assert Path(cohort["participants"]).stat().st_mtime_ns == published_mtime
+
+
+def test_other_p_prefixed_directories_are_still_reported(cohort):
+    folder = Path(cohort["ls"]["input_root"]) / "PRECISE_Thickness_GMV_QC_results_other"
+    folder.mkdir()
+    report = assert_failed(cohort, ["invalid_image_id"])
+    assert any(issue["participant_id"] == folder.name for issue in report["issues"])
+
+
 @pytest.mark.parametrize("missing", [("t1w",), ("flair",), ("t1w", "flair")])
 def test_missing_modalities_are_recorded_once_and_complete_subject_continues(cohort, missing, capsys):
     raw = Path(cohort["ls"]["input_root"])

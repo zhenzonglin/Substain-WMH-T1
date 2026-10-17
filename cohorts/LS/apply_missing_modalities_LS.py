@@ -9,7 +9,10 @@ import shutil
 import sys
 
 HERE = Path(__file__).resolve().parent
-PREVIOUS_SHA256 = '591c9999d8cc3d5207bb90b0e08b39c28a66ad8275593422b4479f195063ac1d'
+KNOWN_PREVIOUS_SHA256 = frozenset({
+    '591c9999d8cc3d5207bb90b0e08b39c28a66ad8275593422b4479f195063ac1d',
+    'f40d700337ec306acb5c243ea3aef4f7a32f30c92af1f39f23345c715a7dbe17',
+})
 
 
 def apply(root: Path, runner=None) -> dict:
@@ -36,7 +39,8 @@ def apply(root: Path, runner=None) -> dict:
         old_data = target.read_bytes()
         if old_data == new_data:
             return {'status': 'already_updated', 'target': str(target)}
-        if hashlib.sha256(old_data).hexdigest() != PREVIOUS_SHA256:
+        old_sha256 = hashlib.sha256(old_data).hexdigest()
+        if old_sha256 not in KNOWN_PREVIOUS_SHA256:
             raise ValueError('Input adapter differs from the known installed version; preserved')
         frozen = [Path(cfg['participants'])] + [logs / name for name in (
             'run_manifest_LS.json', 'audit_guard_LS.json', 'pilot_verification_LS.json')]
@@ -55,7 +59,7 @@ def apply(root: Path, runner=None) -> dict:
             raise RuntimeError('Input adapter changed during backup; no replacement performed')
         runner.write_same(target, new_data)
         result = {'status': 'updated', 'target': str(target), 'backup': str(saved),
-                  'before': PREVIOUS_SHA256, 'after': expected, 'changed_runtime_files': 1}
+                  'before': old_sha256, 'after': expected, 'changed_runtime_files': 1}
         runner.write_same(saved / 'update_LS.json', json.dumps(result, indent=2) + '\n')
         return result
 
