@@ -1,5 +1,9 @@
 # WMH–T1 40维结构特征工程 V1.0
 
+本分支提供 **LS 健康队列的 GitHub 安装流程**：[克隆、安装和启动说明](cohorts/LS/README.md)。
+LS 使用工作站已运行成功的 `/data02/linzhenzong/Substain_GB` 作为基线，入口为 `bash cohorts/LS/install_LS.sh`。
+以下内容保留为原始框架说明；LS 的配置、名单、运行状态和结果采用独立路径与 `_LS` 文件名。
+
 本项目从每例T1、FLAIR和FSL MNI152空间急性卒中二值病灶生成20个WMH特征与20个T1灰质萎缩特征。本阶段只生成特征和QC，不运行SuStaIn。
 
 ## 运行入口

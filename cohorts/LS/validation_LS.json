@@ -1,0 +1,27 @@
+{
+  "date": "2026-10-17",
+  "distribution": "git_source_checkout",
+  "branch": "codex/ls-cohort-install",
+  "status": "local_validation_passed",
+  "runtime": "Linux / Python 3.8.10 / Snakemake 7.32.4",
+  "test_command": "PYTHONDONTWRITEBYTECODE=1 python -m pytest -q -o addopts= -p no:cacheprovider cohorts/LS/tests",
+  "tests_passed": 90,
+  "tests_failed": 0,
+  "tests_skipped": 0,
+  "test_fixtures_self_contained": true,
+  "original_ls_regression_tests": 84,
+  "additional_distribution_tests": 6,
+  "coverage": [
+    "Original LS input, isolation, real Snakemake dry-run, GPU lock and orchestration regressions",
+    "Runtime-only install file whitelist and upstream dependency licenses",
+    "Idempotent installation; documentation and tests excluded from workstation runtime",
+    "Existing manual runtime changes are not overwritten",
+    "Source checkout checksum, required-file and path validation",
+    "Short Bash installer from an unrelated working directory",
+    "Modified source rejected before invoking the project interpreter"
+  ],
+  "workstation_connected": false,
+  "workstation_model_inference_run": false,
+  "workstation_full_queue_started": false,
+  "note": "Tests use synthetic data and repository-contained source fixtures; real cohort counts and model execution are validated on the workstation."
+}
