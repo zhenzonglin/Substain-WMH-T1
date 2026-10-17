@@ -175,11 +175,11 @@ def _display_text(value: object, limit: int = 500) -> str:
     return "".join(char if char.isprintable() else " " for char in str(value))[:limit]
 
 
-def _log_tail(log_dir: Path) -> Tuple[dict, List[str]]:
+def _log_tail(log_dir: Path, pointer_name: str = "full_run_LS.logpath") -> Tuple[dict, List[str]]:
     """Bounded reads of the LS main log only; never follow a pointer outside log_dir."""
     result = {"status": "not_ready", "path": None, "mtime_utc": None, "lines": []}
     try:
-        pointer = (log_dir / "full_run_LS.logpath").resolve()
+        pointer = (log_dir / pointer_name).resolve()
         pointer.relative_to(log_dir)
         if not stat.S_ISREG(pointer.stat().st_mode):
             raise ValueError("LS log pointer is not a regular file")
@@ -258,15 +258,41 @@ def _input_report(data: Mapping) -> Tuple[dict, List[str]]:
         return dict(result, status="unknown"), ["Cannot read LS input report: {}".format(exc)]
 
 
-def _active_jobs(people: Sequence[str], config_path: Path, processes: Sequence[dict], runner: dict
+def _warmup_state(log_dir: Path, config_path: Path, processes: Mapping[int, dict]) -> Tuple[dict, List[str]]:
+    result = {"status": "absent", "phase": None, "pid": None}
+    try:
+        item = json.loads((log_dir / "warmup80_LS.json").read_text(encoding="utf-8"))
+        script = _absolute(item['script'], 'warmup script')
+        if (item['config'] != str(config_path) or script.name != 'warmup80_LS.py' or item.get('goal') != 80
+                or type(item['pid']) is not int or item['pid'] <= 0
+                or item['phase'] not in ('starting', 'preflight', 'waiting_scheduler', 'draining', 'collecting', 'threshold_met', 'parallel', 'complete', 'already_satisfied', 'error')):
+            raise ValueError('Unexpected LS warmup identity or phase')
+        result.update(item)
+        process = processes.get(item['pid'])
+        if process is None:
+            return dict(result, status='exited'), []
+        if (process['start_ticks'] != item['start_ticks'] or process['pgid'] != item['pgid']
+                or str(script) not in process['argv'] or 'worker' not in process['argv']
+                or _config_context(process['argv'], config_path) is not True):
+            return dict(result, status='stale_pid'), ['Warmup PID identity changed; not counted as LS controller']
+        return dict(result, status='running', state=process['state'], cpu_seconds=process.get('cpu_seconds')), []
+    except FileNotFoundError:
+        return result, []
+    except (OSError, ValueError, TypeError, KeyError) as exc:
+        return dict(result, status='unknown'), ['Cannot read LS warmup controller: {}'.format(exc)]
+
+
+def _active_jobs(people: Sequence[str], config_path: Path, processes: Sequence[dict], runner: dict,
+                 coordinator: Optional[dict] = None
                  ) -> Tuple[Set[Tuple[str, str]], Set[int]]:
     live = {process["pid"]: process for process in processes if process["state"] not in ("Z", "X")}
     contexts = {pid: _config_context(process["argv"], config_path) for pid, process in live.items()}
     related = set()  # type: Set[int]
-    pgid = None
-    if runner["status"] == "running":
-        related.add(runner["pid"])
-        pgid = runner["pgid"]
+    pgids = set()
+    for master in (runner, coordinator or {}):
+        if master.get("status") == "running":
+            related.add(master["pid"])
+            pgids.add(master["pgid"])
     while True:
         children = {pid for pid, process in live.items()
                     if process["ppid"] in related and contexts[pid] is not False}
@@ -278,7 +304,7 @@ def _active_jobs(people: Sequence[str], config_path: Path, processes: Sequence[d
     for pid, process in live.items():
         argv = process["argv"]
         context = contexts[pid]
-        if context is False or not (context is True or pid in related or (pgid and process["pgid"] == pgid)):
+        if context is False or not (context is True or pid in related or process["pgid"] in pgids):
             continue
         related.add(pid)
         participant = _option(argv, ("--participant-id",))
@@ -370,8 +396,11 @@ def snapshot(config: Union[str, Path, Mapping]) -> dict:
     processes, visible, process_errors = read_processes()
     live = {process["pid"]: process for process in processes if process["state"] not in ("Z", "X")}
     runner, runner_errors = _runner_state(log_dir, config_path, live)
+    coordinator, coordinator_errors = _warmup_state(log_dir, config_path, live)
     if not visible and runner["status"] == "exited":
         runner["status"] = "unknown"
+    if not visible and coordinator["status"] == "exited":
+        coordinator["status"] = "unknown"
     people, roster_state, roster_errors = [], "ready", []
     try:
         people = _roster(participants)
@@ -380,13 +409,16 @@ def snapshot(config: Union[str, Path, Mapping]) -> dict:
     except (OSError, ValueError, UnicodeError) as exc:
         roster_state = "unknown"
         roster_errors.append("Cannot read LS participant roster: {}".format(exc))
-    log, log_errors = _log_tail(log_dir)
+    coordinator_log = (coordinator['status'] == 'running' or
+                       (coordinator.get('phase') == 'error' and runner['status'] != 'running'))
+    log, log_errors = _log_tail(log_dir, 'warmup80_LS.logpath' if coordinator_log else 'full_run_LS.logpath')
     report, report_errors = _input_report(data)
-    jobs, pids = _active_jobs(people, config_path, processes, runner)
-    errors = process_errors + runner_errors + roster_errors + log_errors + report_errors
+    jobs, pids = _active_jobs(people, config_path, processes, runner, coordinator)
+    errors = process_errors + runner_errors + roster_errors + log_errors + report_errors + coordinator_errors
     stages = {stage: dict({key: 0 for key in COUNTERS}, total=len(people)) for stage in STAGES}
     latest = {stage: {"participant_id": None, "finished": None, "duration_seconds": None} for stage in STAGES}
     overall = dict({key: 0 for key in COUNTERS}, total=len(people), incomplete=0)
+    pre_t1_pass = 0
     for person in people:
         states = []
         for stage in STAGES:
@@ -403,6 +435,7 @@ def snapshot(config: Union[str, Path, Mapping]) -> dict:
                     latest[stage] = {"participant_id": person, "finished": finished, "duration_seconds": duration}
             stages[stage][state] += 1
             states.append(state)
+        pre_t1_pass += int(all(state == 'pass' for state in states[:5]))
         category = ("unknown" if "unknown" in states else "running" if "running" in states else
                     "fail" if "fail" in states else "pass" if all(state == "pass" for state in states) else "pending")
         overall[category] += 1
@@ -415,6 +448,7 @@ def snapshot(config: Union[str, Path, Mapping]) -> dict:
             "config": str(config_path), "participants": str(participants), "derivatives": str(derivatives),
             "roster_state": roster_state, "main_log": log, "input_report": report,
             "stages": stages, "latest": latest, "execution": data.get("execution", {}),
+            "coordinator": coordinator, "pre_t1_pass": pre_t1_pass if roster_state == 'ready' else None,
             "overall": overall, "runner": runner, "process_visibility_complete": visible,
             "active_jobs": [{"stage": stage, "participant_id": person} for stage, person in sorted(jobs)],
             "errors": errors, "resources": resource_snapshot(pids)}
@@ -424,6 +458,9 @@ def format_verbose_snapshot(result: Mapping) -> str:
     lines = ["LS | {}".format(result["timestamp_utc"]), "Results: {}".format(result["derivatives"]),
              "Runner: {} | PID={}".format(result["runner"]["status"], result["runner"]["pid"])]
     runner = result["runner"]
+    coordinator = result.get('coordinator', {})
+    if coordinator.get('status') == 'running' and runner['status'] != 'running':
+        runner = coordinator
     if runner["status"] == "running":
         lines.append("Verified runner: state={} | CPU seconds={} | read_bytes={} | rchar={}".format(
             *(runner.get(key) for key in ("state", "cpu_seconds", "read_bytes", "rchar"))))
@@ -527,9 +564,22 @@ def format_snapshot(result: Mapping, verbose: bool = False) -> str:
     lines.append("总例数={} | 八步全部完成={} | 进行中={} | 有失败={} | 其余等待={} | 未知={} | 未完成={}".format(
         *(overall[key] if overall[key] is not None else "?" for key in ("total", "pass", "running", "fail", "pending", "unknown", "incomplete"))))
     runner = result["runner"]
+    coordinator = result.get('coordinator', {})
+    if coordinator.get('status') == 'running' and runner['status'] != 'running':
+        runner = coordinator
     label = {"running": "运行", "exited": "已退出", "not_running": "未启动", "stale_pid": "PID身份不符", "unknown": "无法确认"}.get(runner["status"], "无法确认")
     lines.append("LS入口：{} | PID={} | 进程状态={} | 累计CPU秒={}".format(
         label, runner.get("pid") or "--", runner.get("state") or "--", runner.get("cpu_seconds") if runner.get("cpu_seconds") is not None else "未知"))
+    coordinator = result.get('coordinator', {})
+    if coordinator.get('status', 'absent') != 'absent':
+        phases = dict(starting='启动协调', preflight='检查已有记录', waiting_scheduler='等待调度入口',
+            draining='暂停新投放，等待当前任务结束', collecting='仅运行前五阶段', threshold_met='80人已满足',
+            parallel='已恢复前置步骤与T1并行', complete='队列完成', already_satisfied='已满足80人，原队列继续', error='协调失败')
+        state_label = {'running': '运行', 'exited': '已退出', 'stale_pid': 'PID身份不符', 'unknown': '无法确认'}.get(coordinator['status'], '未知')
+        lines.append('一次性资源协调：{} | 前五阶段通过={}/80 | 控制器={} PID={}'.format(
+            phases.get(coordinator.get('phase'), '未知'), result.get('pre_t1_pass'), state_label, coordinator.get('pid')))
+        if coordinator.get('error'):
+            lines.append('协调异常：' + _display_text(coordinator['error']))
     log = result.get("main_log", {})
     if log.get("lines") and (not result["active_jobs"] or report.get("status") == "fail"):
         lines.append("最近日志：" + log["lines"][-1])

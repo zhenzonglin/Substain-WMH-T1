@@ -429,6 +429,39 @@ class MonitorTests(unittest.TestCase):
         self.assertEqual(monitor._duration(None), "--")
         self.assertEqual(monitor._duration(744), "0:12:24")
 
+    def controller(self, phase='collecting'):
+        script = self.root / 'warmup80_LS.py'
+        (self.logs / 'warmup80_LS.json').write_text(json.dumps(dict(pid=90, pgid=90, start_ticks=999,
+            config=str(self.config_path), script=str(script), phase=phase, goal=80)))
+        return self.process(90, ['python', str(script), 'worker', '--config', str(self.config_path)], pgid=90, ticks=999)
+
+    def test_warmup_monitor_tracks_both_draining_and_new_process_trees(self):
+        self.people('P0001', 'P0005')
+        for stage in monitor.STAGES[:5]:
+            self.status('P0001', stage)
+        self.processes = [self.master(), self.controller(), self.stage(51, 'P0001', ppid=50),
+            self.process(52, ['DLMUSE'], ppid=51), self.stage(91, 'P0005', 'wmh_seg', ppid=90, pgid=90),
+            self.process(92, ['nnUNet'], ppid=91, pgid=90)]
+        result = monitor.snapshot(self.config)
+        self.assertEqual(result['pre_t1_pass'], 1)
+        self.assertEqual(result['coordinator']['status'], 'running')
+        self.assertEqual(result['resources']['pids'], [50, 51, 52, 90, 91, 92])
+        self.assertIn('仅运行前五阶段', monitor.format_snapshot(result))
+        self.assertIn('前五阶段通过=1/80', monitor.format_snapshot(result))
+
+    def test_warmup_parallel_entry_replaces_exited_runner_display(self):
+        self.master()
+        self.processes = [self.controller('parallel')]
+        result = monitor.snapshot(self.config)
+        self.assertEqual(result['runner']['status'], 'exited')
+        output = monitor.format_snapshot(result)
+        self.assertIn('LS入口：运行 | PID=90', output)
+        self.assertIn('已恢复前置步骤与T1并行', output)
+        self.processes[0]['start_ticks'] += 1
+        result = monitor.snapshot(self.config)
+        self.assertEqual(result['coordinator']['status'], 'stale_pid')
+        self.assertIn('PID身份不符', monitor.format_snapshot(result))
+
 
 if __name__ == "__main__":
     unittest.main()

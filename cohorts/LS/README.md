@@ -92,6 +92,29 @@ bash /data02/linzhenzong/Substain_GB/scripts/resume_LS.sh
 
 正常阶段失败遵循原队列的 fail/cleanup 机制，保留失败记录并继续其他病例。此前 GB 的外置 T1 看守器不会被本包自动接管或改写；它原有 GB 进程筛选规则不能直接当作 LS 看守器使用。
 
+## 一次性积累80人后恢复并行
+
+运行中需要错开最初的 T1 资源占用时，使用外置协调入口：
+
+```bash
+cd /data02/linzhenzong/Substain_LS_installer
+git pull --ff-only && bash cohorts/LS/warmup80_LS.sh
+```
+
+出现 `LS_WARMUP80_STARTED` 后流程在后台执行。仅向身份核实的 LS Snakemake 7.32.4 主调度进程发送其支持的正常收尾信号，停止新任务投放，等待已启动的影像计算结束。单独结束阻塞中的轻量滚动准入等待进程，防止等待尚未调度的 cleanup 导致无法交接；不向影像作业或进程组发送终止信号。
+
+随后仅运行去颅骨、WMH分割、配准、病灶处理和 WMH20 特征，累计至少80人五阶段全部通过后，自动恢复原前置步骤、T1、QC、清理混合并行。已通过者计入80人；已完成状态复用，失败者保留记录但不计入通过门槛。如果启动时已达80人且原队列正在运行，则直接报告已满足，不打断原队列。这是一次性门槛，不是每80人反复分批，也不是强制GPU模式，原GPU槽位和CPU回退策略保留。
+
+协调器读取工作站已安装的 runner 和 Snakefile，不替换已冻结代码、配置、环境、模型、名单或审计记录。恢复并行仍由原 worker 执行输入/代码身份检查并复用已通过审计与单例；只将调度器的重跑触发限定为 mtime，避免准入令牌路径切换触发已完成影像计算重跑。CPU总预算、任务上限、线程数和物理GPU锁保持原设置。GB或另一分析入口活跃、PID身份异常、配置变化、上游有效人数不足80时会明确停止协调。
+
+重开外置监测窗口即可查看“暂停新投放，等待当前任务结束 → 仅运行前五阶段 → 已恢复前置步骤与T1并行”及前五阶段通过人数：
+
+```bash
+bash /data02/linzhenzong/Substain_LS_installer/cohorts/LS/monitor_LS.sh --interval 30
+```
+
+协调状态、PID、日志指针为 `logs/LS/warmup80_LS.json`、`warmup80_LS.pid`、`warmup80_LS.logpath`；原日志保留。期间不要另开 `run_LS.sh` 或 `resume_LS.sh`；协调器会自动接续原队列。若协调器已退出且需要续跑，重新执行 `warmup80_LS.sh` 会复用已有状态，达到80人的情况下直接恢复并行。
+
 ## 输入与方法
 
 输入根目录为 `/data02/linzhenzong/LS/`，临床表为 `LS_INFO.xlsx`。首行必须唯一包含 BIGDATA_CODE、AGE、SEX；多个匹配工作表不自动猜选。

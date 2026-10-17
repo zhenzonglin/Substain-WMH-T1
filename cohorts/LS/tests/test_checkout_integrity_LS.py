@@ -83,9 +83,10 @@ def test_shell_install_from_unrelated_directory_verifies_then_invokes_existing_p
 
 
 @pytest.mark.skipif(os.name == 'nt', reason='Workstation monitor entrypoint is Linux Bash')
-def test_checkout_monitor_invokes_external_code_without_changing_installed_runtime(tmp_path):
+@pytest.mark.parametrize('entry,extra', [('monitor_LS', ['--interval', '30']), ('warmup80_LS', [])])
+def test_checkout_monitor_invokes_external_code_without_changing_installed_runtime(tmp_path, entry, extra):
     root = source_tree(tmp_path)
-    shutil.copyfile(str(PACKAGE / 'monitor_LS.sh'), str(root / 'monitor_LS.sh'))
+    shutil.copyfile(str(PACKAGE / (entry + '.sh')), str(root / (entry + '.sh')))
     project = tmp_path / 'existing GB'
     python = project / 'envs/core-venv/bin/python'
     python.parent.mkdir(parents=True)
@@ -98,8 +99,8 @@ def test_checkout_monitor_invokes_external_code_without_changing_installed_runti
     installed.write_text('# previously installed frozen monitor\n')
     before = {str(p): p.read_bytes() for p in project.rglob('*') if p.is_file()}
     env = dict(os.environ, SUBSTAIN_PROJECT_ROOT=str(project), LS_TEST_INVOCATION=str(record))
-    subprocess.run(['bash', str(root / 'monitor_LS.sh'), '--interval', '30'], cwd=str(tmp_path), env=env,
+    subprocess.run(['bash', str(root / (entry + '.sh'))] + extra, cwd=str(tmp_path), env=env,
                    text=True, capture_output=True, check=True)
-    assert record.read_text().splitlines() == [str(root / 'monitor_LS.py'), '--config',
-                                              str(project / 'config/config_LS.yaml'), '--interval', '30']
+    expected = [str(root / (entry + '.py'))] + (['start'] if entry == 'warmup80_LS' else [])
+    assert record.read_text().splitlines() == expected + ['--config', str(project / 'config/config_LS.yaml')] + extra
     assert {str(p): p.read_bytes() for p in project.rglob('*') if p.is_file()} == before
