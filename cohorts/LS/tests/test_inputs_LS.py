@@ -143,6 +143,125 @@ def test_identical_repeat_does_not_touch_mtime(cohort):
     assert before == after
 
 
+@pytest.mark.parametrize("missing", [("t1w",), ("flair",), ("t1w", "flair")])
+def test_missing_modalities_are_recorded_once_and_complete_subject_continues(cohort, missing, capsys):
+    raw = Path(cohort["ls"]["input_root"])
+    filenames = {"t1w": "scan_T1w_native.nii.gz", "flair": "scan_T2wFLAIR_native.nii.gz"}
+    for modality in missing:
+        (raw / "P0005" / filenames[modality]).unlink()
+    before = {str(path): (inputs.sha256(path), path.stat().st_mtime_ns) for path in raw.rglob("*") if path.is_file()}
+    result = inputs.prepare_inputs(cohort)
+    assert result["status"] == "pass"
+    assert result["image_subject_count"] == 2
+    assert result["participants_count"] == 1
+    assert result["excluded_subject_count"] == 1
+    assert result["missing_t1w_count"] == int("t1w" in missing)
+    assert result["missing_flair_count"] == int("flair" in missing)
+    assert [row["participant_id"] for row in read_tsv(cohort["participants"])] == ["P0015"]
+    assert [row["participant_id"] for row in read_tsv(result["metadata_tsv"])] == ["P0015"]
+    assert [row["participant_id"] for row in read_tsv(result["normative_eligibility_tsv"])] == ["P0015"]
+    assert result["normative_eligible_count"] == 1
+    assert result["normative_ineligible_count"] == 0
+    excluded = read_tsv(result["excluded_subjects_tsv"])
+    assert len(excluded) == 1
+    assert excluded[0]["participant_id"] == "P0005"
+    assert excluded[0]["missing_modalities"] == ";".join(missing)
+    assert excluded[0]["exclusion_reason"] == ";".join("missing_" + modality for modality in missing)
+    assert excluded[0]["image_directory"] == str((raw / "P0005").resolve())
+    assert (excluded[0]["age"], excluded[0]["sex"], excluded[0]["site_id"], excluded[0]["source_row"]) == ("21.7", "female", "LS", "3")
+    for modality in ("t1w", "flair"):
+        candidates = json.loads(excluded[0][modality + "_candidates"])
+        assert len(candidates) == (0 if modality in missing else 1)
+    matching = {row["participant_id"]: row for row in read_tsv(Path(cohort["ls"]["preparation_dir"]) / "input_matching_LS.tsv")}
+    assert set(matching) == {"P0005", "P0015", "P0099"}
+    assert matching["P0005"]["included_for_analysis"] == "False"
+    assert matching["P0015"]["included_for_analysis"] == "True"
+    assert matching["P0099"]["included_for_analysis"] == "False"
+    assert matching["P0099"]["exclusion_reason"] == "no_image_directory"
+    assert len(read_tsv(result["clinical_tsv"])) == 3
+    warnings = [issue for issue in result["issues"] if issue["participant_id"] == "P0005"]
+    assert {issue["code"] for issue in warnings} == {modality + "_count" for modality in missing}
+    assert all(issue["severity"] == "warning" for issue in warnings)
+    assert before == {str(path): (inputs.sha256(path), path.stat().st_mtime_ns) for path in raw.rglob("*") if path.is_file()}
+    logged = capsys.readouterr().out
+    assert "image_subject_count=2 participants_count=1 excluded_subject_count=1" in logged
+    assert result["excluded_subjects_tsv"] in logged
+    project = Path(cohort["project_root"])
+    published = {str(path): (inputs.sha256(path), path.stat().st_mtime_ns) for path in project.rglob("*") if path.is_file()}
+    assert inputs.prepare_inputs(cohort) == result
+    assert published == {str(path): (inputs.sha256(path), path.stat().st_mtime_ns) for path in project.rglob("*") if path.is_file()}
+
+
+def test_mixed_missing_modalities_have_per_subject_overlap_counts(cohort):
+    raw = Path(cohort["ls"]["input_root"])
+    write_image(raw / "P0099" / "scan_T1w_native.nii.gz")
+    (raw / "P0005" / "scan_T1w_native.nii.gz").unlink()
+    (raw / "P0005" / "scan_T2wFLAIR_native.nii.gz").unlink()
+    result = inputs.prepare_inputs(cohort)
+    assert result["image_subject_count"] == 3
+    assert result["participants_count"] == 1
+    assert result["excluded_subject_count"] == 2
+    assert result["missing_t1w_count"] == 1
+    assert result["missing_flair_count"] == 2
+    assert [row["participant_id"] for row in read_tsv(result["excluded_subjects_tsv"])] == ["P0005", "P0099"]
+
+
+@pytest.mark.parametrize("already_published", [False, True])
+def test_no_complete_pairs_writes_reports_without_publishing_or_replacing_roster(cohort, already_published):
+    participants = Path(cohort["participants"])
+    if already_published:
+        inputs.prepare_inputs(cohort)
+        before = participants.read_bytes(), participants.stat().st_mtime_ns
+    raw = Path(cohort["ls"]["input_root"])
+    for participant in ("P0005", "P0015"):
+        (raw / participant / "scan_T1w_native.nii.gz").unlink()
+    with pytest.raises(inputs.InputPreparationError):
+        inputs.prepare_inputs(cohort)
+    report = report_for(cohort)
+    assert report["status"] == "fail"
+    assert {issue["code"] for issue in report["issues"] if issue["severity"] == "error"} == {"no_complete_image_pairs"}
+    assert report["participants_count"] == 0
+    assert report["excluded_subject_count"] == 2
+    assert report["normative_eligible_count"] == 0
+    assert len(read_tsv(report["excluded_subjects_tsv"])) == 2
+    assert len(read_tsv(report["clinical_tsv"])) == 3
+    if already_published:
+        assert (participants.read_bytes(), participants.stat().st_mtime_ns) == before
+    else:
+        assert not participants.exists()
+
+
+@pytest.mark.parametrize("modality,filename", [("t1w", "second_T1w.nii.gz"), ("flair", "second_T2wFLAIR.nii.gz")])
+def test_duplicate_image_candidates_remain_blocking(cohort, modality, filename):
+    write_image(Path(cohort["ls"]["input_root"]) / "P0005" / filename)
+    report = assert_failed(cohort, [modality + "_count"])
+    issue = next(issue for issue in report["issues"] if issue["code"] == modality + "_count")
+    assert issue["severity"] == "error"
+    assert report["excluded_subject_count"] == 0
+
+
+def test_missing_modality_does_not_hide_corrupt_remaining_nifti(cohort):
+    directory = Path(cohort["ls"]["input_root"]) / "P0005"
+    (directory / "scan_T1w_native.nii.gz").unlink()
+    (directory / "scan_T2wFLAIR_native.nii.gz").write_bytes(b"invalid NIfTI")
+    assert_failed(cohort, ["invalid_nifti"])
+
+
+def test_exclusion_reports_are_written_before_publishing_included_roster(cohort, monkeypatch):
+    (Path(cohort["ls"]["input_root"]) / "P0005" / "scan_T1w_native.nii.gz").unlink()
+    original = inputs._atomic_text
+
+    def verify_publication_order(path, text, allowed):
+        if path == Path(cohort["participants"]):
+            report = report_for(cohort)
+            assert report["excluded_subject_count"] == 1
+            assert read_tsv(report["excluded_subjects_tsv"])[0]["participant_id"] == "P0005"
+        return original(path, text, allowed)
+
+    monkeypatch.setattr(inputs, "_atomic_text", verify_publication_order)
+    inputs.prepare_inputs(cohort)
+
+
 @pytest.mark.parametrize("age", ["NaN", "Inf", "-Inf", "not a number", None, 0, 121])
 def test_invalid_age_blocks_without_partial_participants(cohort, age):
     write_clinical(Path(cohort["ls"]["clinical_file"]), [["P0015", age, 1], ["P0005", 50, 2]])

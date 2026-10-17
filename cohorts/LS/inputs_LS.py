@@ -2,8 +2,9 @@
 
 ``prepare_inputs(config)`` writes only in ``ls.preparation_dir`` and the
 explicit ``participants_LS.tsv`` destination. Expected input errors are
-collected before the reports are written; no partial participant table is
-published. Normative ineligibility is reported, not an input exclusion.
+collected before the reports are written; subjects missing either image are
+recorded and excluded. Other input errors prevent participant publication.
+Normative ineligibility is reported, not an input exclusion.
 """
 
 from __future__ import annotations
@@ -225,7 +226,7 @@ def _scan_images(root: Path, issues: List[dict]) -> Dict[str, dict]:
             record[modality + "_candidates"] = [str(path) for path in paths]
             record[modality] = str(paths[0]) if len(paths) == 1 else ""
             if len(paths) != 1:
-                _issue(issues, "{}_count".format(modality), "Expected one {} file, found {}: {}".format(modality, len(paths), paths), participant)
+                _issue(issues, "{}_count".format(modality), "Expected one {} file, found {}: {}".format(modality, len(paths), paths), participant, severity="warning" if not paths else "error")
             else:
                 try:
                     nib.load(str(paths[0]))
@@ -330,7 +331,7 @@ def _zero_mask(path: Path, template: Any, allowed: Sequence[Path]) -> None:
 
 
 def prepare_inputs(config: dict) -> dict:
-    """Prepare all image subjects, preserving normative-ineligible records.
+    """Prepare complete image pairs, preserving normative-ineligible records.
 
     ``config['ls']`` requires ``input_root``, ``clinical_file``,
     ``preparation_dir`` and ``template``; ``site_id`` defaults to ``LS``.
@@ -376,7 +377,12 @@ def prepare_inputs(config: dict) -> dict:
     site = str(settings.get("site_id", "LS")).strip()
     if not site:
         _issue(issues, "invalid_site_id", "site_id must not be blank")
+    complete_image_ids = sorted(participant for participant, image in images.items()
+                                if all(len(image[modality + "_candidates"]) == 1 for modality in ("t1w", "flair")))
+    if not complete_image_ids:
+        _issue(issues, "no_complete_image_pairs", "No subjects have exactly one matched T1w and one matched T2wFLAIR image; participants were not published")
     matching = []
+    excluded = []
     manifest = []
     for participant in sorted(set(images) | set(clinical)):
         image = images.get(participant, {})
@@ -385,7 +391,20 @@ def prepare_inputs(config: dict) -> dict:
             _issue(issues, "clinical_match_missing", "No matching BIGDATA_CODE record", participant)
         elif participant in clinical and participant not in images:
             _issue(issues, "clinical_only", "Clinical row retained; no image subject directory", participant, row.get("source_row", ""), "warning")
-        matching.append({"participant_id": participant, "image_present": participant in images, "clinical_present": participant in clinical, "clinical_valid": row.get("clinical_valid", False), "source_row": row.get("source_row", ""), "age": row.get("age", ""), "sex": row.get("sex", ""), "t1w": image.get("t1w", ""), "flair": image.get("flair", ""), "t1w_candidates": json.dumps(image.get("t1w_candidates", []), ensure_ascii=False), "flair_candidates": json.dumps(image.get("flair_candidates", []), ensure_ascii=False)})
+        missing = [modality for modality in ("t1w", "flair") if participant in images and not image[modality + "_candidates"]]
+        reasons = ["missing_{}".format(modality) for modality in missing]
+        if participant not in images:
+            reasons.append("no_image_directory")
+        else:
+            reasons.extend("ambiguous_{}".format(modality) for modality in ("t1w", "flair") if len(image[modality + "_candidates"]) > 1)
+        if not row.get("clinical_valid"):
+            reasons.append("clinical_missing_or_invalid")
+        if any(issue["code"] == "invalid_nifti" and issue["participant_id"] == participant for issue in issues):
+            reasons.append("invalid_nifti")
+        match = {"participant_id": participant, "image_present": participant in images, "clinical_present": participant in clinical, "clinical_valid": row.get("clinical_valid", False), "source_row": row.get("source_row", ""), "age": row.get("age", ""), "sex": row.get("sex", ""), "site_id": site, "image_directory": image.get("image_directory", ""), "t1w": image.get("t1w", ""), "flair": image.get("flair", ""), "t1w_candidates": json.dumps(image.get("t1w_candidates", []), ensure_ascii=False), "flair_candidates": json.dumps(image.get("flair_candidates", []), ensure_ascii=False), "included_for_analysis": not reasons, "exclusion_reason": ";".join(reasons)}
+        matching.append(match)
+        if missing:
+            excluded.append(dict(match, missing_modalities=";".join(missing)))
         for modality in ("t1w", "flair"):
             for path_text in image.get(modality + "_candidates", []):
                 path = Path(path_text)
@@ -393,7 +412,8 @@ def prepare_inputs(config: dict) -> dict:
                     manifest.append({"participant_id": participant, "modality": modality, "source": str(path), "source_sha256": sha256(path), "source_kind": "original_image"})
                 except OSError as exc:
                     _issue(issues, "image_hash_error", "{}: {}".format(path, exc), participant)
-    eligibility = _eligibility(clinical, references, reference_info, list(images))
+    included_ids = [row["participant_id"] for row in matching if row["included_for_analysis"]]
+    eligibility = _eligibility(clinical, references, reference_info, included_ids)
     for modality, fingerprint in (("clinical_xlsx", source_fingerprint), ("FSL_MNI152_template", template_info), ("GenMIND_reference", reference_info)):
         if "sha256" in fingerprint:
             manifest.append({"participant_id": "", "modality": modality, "source": fingerprint["path"], "source_sha256": fingerprint["sha256"], "source_kind": "original_source"})
@@ -404,11 +424,12 @@ def prepare_inputs(config: dict) -> dict:
         except (OSError, ValueError, nib.filebasedimages.ImageFileError) as exc:
             _issue(issues, "existing_zero_mask_error", str(exc))
     report_path = prep / "input_report_LS.json"
-    report: Dict[str, Any] = {"status": "fail" if any(item["severity"] == "error" for item in issues) else "pass", "cohort": "LS", "input_root": str(source_root), "clinical_source": dict(source_fingerprint, **sheet), "image_subject_count": len(images), "clinical_row_count": len(raw_clinical), "clinical_unique_id_count": len(clinical), "clinical_only_count": len(set(clinical) - set(images)), "participants_count": len(images), "normative_eligible_count": sum(bool(row["eligible"]) for row in eligibility), "normative_ineligible_count": sum(not bool(row["eligible"]) for row in eligibility), "normative_scope": "age_sex_reference_count_only; image-dependent normative checks remain in the original pipeline", "normative_reference": reference_info, "template": template_info, "healthy_no_acute_lesion": True, "lesion_source_kind": "synthetic_zero_mask", "participants_tsv": str(participants), "metadata_tsv": str(prep / "metadata_LS.tsv"), "clinical_tsv": str(prep / "clinical_LS.tsv"), "normative_eligibility_tsv": str(prep / "normative_eligibility_LS.tsv"), "input_manifest": str(prep / "input_manifest_LS.tsv"), "report_path": str(report_path), "raw_inputs_modified": False, "issues": issues}
+    report: Dict[str, Any] = {"status": "fail" if any(item["severity"] == "error" for item in issues) else "pass", "cohort": "LS", "input_root": str(source_root), "clinical_source": dict(source_fingerprint, **sheet), "image_subject_count": len(images), "clinical_row_count": len(raw_clinical), "clinical_unique_id_count": len(clinical), "clinical_only_count": len(set(clinical) - set(images)), "participants_count": len(included_ids), "excluded_subject_count": len(excluded), "missing_t1w_count": sum(not image["t1w_candidates"] for image in images.values()), "missing_flair_count": sum(not image["flair_candidates"] for image in images.values()), "missing_modality_count_scope": "image_subject_directories; per-subject modality counts may overlap", "excluded_subjects_tsv": str(prep / "excluded_subjects_LS.tsv"), "normative_eligible_count": sum(bool(row["eligible"]) for row in eligibility), "normative_ineligible_count": sum(not bool(row["eligible"]) for row in eligibility), "normative_scope": "age_sex_reference_count_only; image-dependent normative checks remain in the original pipeline", "normative_reference": reference_info, "template": template_info, "healthy_no_acute_lesion": True, "lesion_source_kind": "synthetic_zero_mask", "participants_tsv": str(participants), "metadata_tsv": str(prep / "metadata_LS.tsv"), "clinical_tsv": str(prep / "clinical_LS.tsv"), "normative_eligibility_tsv": str(prep / "normative_eligibility_LS.tsv"), "input_manifest": str(prep / "input_manifest_LS.tsv"), "report_path": str(report_path), "raw_inputs_modified": False, "issues": issues}
     def write_reports() -> None:
         _atomic_text(prep / "clinical_LS.tsv", _tsv(headers, raw_clinical) if headers else "", allowed)
         _atomic_text(prep / "clinical_formulas_LS.tsv", _tsv(("sheet", "cell", "formula", "cached_value"), formulas), allowed)
-        _atomic_text(prep / "input_matching_LS.tsv", _tsv(("participant_id", "image_present", "clinical_present", "clinical_valid", "source_row", "age", "sex", "t1w", "flair", "t1w_candidates", "flair_candidates"), matching), allowed)
+        _atomic_text(prep / "input_matching_LS.tsv", _tsv(("participant_id", "image_present", "clinical_present", "clinical_valid", "source_row", "age", "sex", "site_id", "image_directory", "t1w", "flair", "t1w_candidates", "flair_candidates", "included_for_analysis", "exclusion_reason"), matching), allowed)
+        _atomic_text(prep / "excluded_subjects_LS.tsv", _tsv(("participant_id", "missing_modalities", "exclusion_reason", "image_directory", "t1w", "flair", "t1w_candidates", "flair_candidates", "clinical_present", "clinical_valid", "source_row", "age", "sex", "site_id"), excluded), allowed)
         _atomic_text(prep / "input_issues_LS.tsv", _tsv(("severity", "code", "participant_id", "source_row", "message"), issues), allowed)
         _atomic_text(prep / "normative_eligibility_LS.tsv", _tsv(("participant_id", "age", "sex", "eligible", "reference_n", "age_half_window", "failure_reason", "scope"), eligibility), allowed)
         _atomic_text(prep / "input_manifest_LS.tsv", _tsv(("participant_id", "modality", "source", "source_sha256", "source_kind"), manifest), allowed)
@@ -420,10 +441,12 @@ def prepare_inputs(config: dict) -> dict:
     mask_provenance = {"source_kind": "synthetic_zero_mask", "reason": "user_confirmed_healthy_no_acute_lesion", "observed_lesion_segmentation": False, "mask_path": str(mask_path), "mask_sha256": sha256(mask_path), "nonzero_voxel_count": 0, "template": template_info}
     report["synthetic_lesion"] = mask_provenance
     manifest.append({"participant_id": "", "modality": "healthy_zero_lesion", "source": str(mask_path), "source_sha256": mask_provenance["mask_sha256"], "source_kind": "synthetic_zero_mask"})
-    rows = [{"participant_id": participant, "age": clinical[participant]["age"], "sex": clinical[participant]["sex"], "site_id": site, "t1w": images[participant]["t1w"], "flair": images[participant]["flair"], "lesion_mask": str(mask_path)} for participant in sorted(images)]
+    rows = [{"participant_id": participant, "age": clinical[participant]["age"], "sex": clinical[participant]["sex"], "site_id": site, "t1w": images[participant]["t1w"], "flair": images[participant]["flair"], "lesion_mask": str(mask_path)} for participant in included_ids]
     _atomic_text(prep / "zero_mask_provenance_LS.json", _json(mask_provenance), allowed)
     _atomic_text(prep / "metadata_LS.tsv", _tsv(METADATA_COLUMNS, rows), allowed)
     write_reports()
-    # Publish participants last so a failed validation cannot publish a subset.
+    # Publish participants last, after the explicit exclusions and validation.
     _atomic_text(participants, _tsv(PARTICIPANT_COLUMNS, rows), allowed)
+    print("LS prepare complete: image_subject_count={} participants_count={} excluded_subject_count={} excluded_subjects_tsv={}".format(
+        report["image_subject_count"], report["participants_count"], report["excluded_subject_count"], report["excluded_subjects_tsv"]), flush=True)
     return report

@@ -181,6 +181,19 @@ def test_additional_image_or_changed_source_cannot_reuse_results(installed):
         runner.check_identity(cfg, config_path)
 
 
+def test_missing_p0001_is_recorded_and_old_runner_selects_complete_pilot(installed):
+    root, config_path, cfg, before = installed
+    (Path(cfg['ls']['input_root']) / 'P0001/source_T1w_run1.nii.gz').unlink()
+    runner.prepare(cfg, config_path)
+    assert [row['participant_id'] for row in runner.participants(cfg)] == ['P0005']
+    assert runner.choose_pilot(cfg) == 'P0005'
+    exclusions = root / 'inputs/cohort_LS/excluded_subjects_LS.tsv'
+    assert 'P0001' in exclusions.read_text()
+    identity = runner.capture_identity(cfg, config_path)
+    assert identity['files'][str(exclusions)] == runner.digest(exclusions)
+    assert all(runner.digest(Path(path)) == checksum for path, checksum in before.items())
+
+
 def test_existing_cpu_fallback_environment_is_recorded_without_reinstallation(monkeypatch, capsys):
     cfg = {'execution': {name + '_python': '/' + name + '/python' for name in ('core', 'wmh', 't1')}}
     calls = []

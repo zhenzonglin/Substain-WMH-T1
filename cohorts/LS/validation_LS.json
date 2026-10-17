@@ -4,13 +4,16 @@
   "branch": "codex/ls-cohort-install",
   "status": "local_validation_passed",
   "runtime": "Linux / Python 3.8.10 / Snakemake 7.32.4",
-  "test_command": "PYTHONDONTWRITEBYTECODE=1 python -m pytest -q -o addopts= -p no:cacheprovider cohorts/LS/tests/test_monitor_LS.py cohorts/LS/tests/test_checkout_integrity_LS.py cohorts/LS/tests/test_distribution_LS.py",
-  "validation_scope": "targeted preparation-phase monitoring and external launch regression",
-  "tests_passed": 28,
+  "test_command": "PYTHONDONTWRITEBYTECODE=1 python -m pytest -q -o addopts= -p no:cacheprovider cohorts/LS/tests/test_inputs_LS.py cohorts/LS/tests/test_missing_modalities_patch_LS.py cohorts/LS/tests/test_deployment_LS.py::test_missing_p0001_is_recorded_and_old_runner_selects_complete_pilot",
+  "validation_scope": "targeted missing-modality exclusion and single-file preparation recovery",
+  "tests_passed": 50,
   "tests_failed": 0,
   "tests_skipped": 0,
   "test_fixtures_self_contained": true,
-  "baseline_full_suite": {"commit": "4eeba20f2c80abf6b562f2eeb1aced16f18a0f80", "tests_passed": 90},
+  "baseline_full_suite": {
+    "commit": "4eeba20f2c80abf6b562f2eeb1aced16f18a0f80",
+    "tests_passed": 90
+  },
   "coverage": [
     "Original LS input, isolation, real Snakemake dry-run, GPU lock and orchestration regressions",
     "Runtime-only install file whitelist and upstream dependency licenses",
@@ -23,9 +26,15 @@
     "Roster permission errors, invalid tables, exited/reused/zombie PIDs remain distinct",
     "Bounded main-log tail and independently dated input reports",
     "Preparation monitoring automatically transitions when the roster is published",
-    "External checkout monitor does not modify the installed runtime"
+    "External checkout monitor does not modify the installed runtime",
+    "Missing T1/FLAIR recorded once per excluded subject; complete pairs continue",
+    "All-missing cohorts do not publish an empty roster; ambiguous/corrupt inputs still block",
+    "Existing runner selects an included pilot and freezes the exclusion audit",
+    "Preparation-only updater backs up the old module and reports; refuses frozen/running/modified installations"
   ],
   "workstation_connected": false,
   "workstation_result_validation": "not_performed_by_this_test_run",
-  "note": "Tests use synthetic data and repository-contained source fixtures; real cohort counts and model execution are validated on the workstation."
+  "note": "Tests use synthetic data and repository-contained source fixtures; real cohort counts and model execution are validated on the workstation.",
+  "changed_workstation_runtime_files": 1,
+  "previous_monitor_fix_tests_passed": 28
 }
