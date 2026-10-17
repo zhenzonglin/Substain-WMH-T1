@@ -3,19 +3,23 @@
 
 import argparse
 import csv
+import hashlib
 import json
+import math
 import os
 import re
 import stat
 import subprocess
 import sys
 import time
-from datetime import datetime, timezone
+import unicodedata
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import List, Mapping, Optional, Sequence, Set, Tuple, Union
 
 
 STAGES = ("skullstrip", "wmh_seg", "registration", "lesion", "wmh", "t1", "qc", "cleanup")
+STAGE_NAMES = ("去颅骨", "WMH分割", "配准", "病灶处理", "WMH20特征", "T1分割/20特征", "QC图", "清理")
 COUNTERS = ("pass", "fail", "running", "pending", "unknown")
 CONFIG_OPTIONS = ("--config", "--config-file", "--configfile")
 SAFE_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]*\Z")
@@ -210,7 +214,7 @@ def _log_tail(log_dir: Path) -> Tuple[dict, List[str]]:
 
 def _input_report(data: Mapping) -> Tuple[dict, List[str]]:
     result = {"status": "not_ready", "path": None, "mtime_utc": None,
-              "error_count": None, "issues": [], "run_attribution": "unverified"}
+              "error_count": None, "issues": [], "run_attribution": "unverified", "counts": {}}
     prep = data["ls"].get("preparation_dir")
     if not prep:
         return result, []
@@ -233,6 +237,20 @@ def _input_report(data: Mapping) -> Tuple[dict, List[str]]:
                       error_count=len(issues), issues=[_display_text("{}: {}".format(
                           issue.get("participant_id") or issue.get("code", "input"), issue.get("message", "")))
                           for issue in issues[:3]])
+        for key in ("image_subject_count", "participants_count", "excluded_subject_count",
+                    "missing_t1w_count", "missing_flair_count"):
+            value = report.get(key)
+            result["counts"][key] = value if type(value) is int and value >= 0 else None
+        # Verify only the two small frozen files; never re-audit images/models.
+        try:
+            frozen = json.loads((_absolute(data["ls"]["log_dir"], "ls.log_dir") / "run_manifest_LS.json").read_text(encoding="utf-8"))
+            roster = _absolute(data["participants"], "participants")
+            files = frozen["files"]
+            if (frozen.get("cohort") == "LS" and files.get(str(path)) == hashlib.sha256(payload).hexdigest()
+                    and files.get(str(roster)) == hashlib.sha256(roster.read_bytes()).hexdigest()):
+                result["run_attribution"] = "frozen_report_and_roster"
+        except (OSError, ValueError, KeyError, TypeError, AttributeError):
+            pass  # Unverified or old reports remain explicitly labelled.
         return result, []
     except FileNotFoundError:
         return result, []
@@ -274,17 +292,40 @@ def _active_jobs(people: Sequence[str], config_path: Path, processes: Sequence[d
     return jobs, related
 
 
-def _status(path: Path, person: str, stage: str) -> Tuple[Optional[str], Optional[str]]:
+def _status(path: Path, person: str, stage: str) -> Tuple[Optional[str], Optional[str], dict]:
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
     except FileNotFoundError:
-        return None, None
+        return None, None, {}
     except (OSError, ValueError, UnicodeError) as exc:
-        return "unknown", "{}/{}: {}".format(person, stage, exc)
+        return "unknown", "{}/{}: {}".format(person, stage, exc), {}
     if (not isinstance(payload, dict) or payload.get("participant_id") != person or
             payload.get("stage") != stage or payload.get("status") not in ("pass", "fail")):
-        return "unknown", "{}/{}: status, stage, or participant ID mismatch".format(person, stage)
-    return payload["status"], None
+        return "unknown", "{}/{}: status, stage, or participant ID mismatch".format(person, stage), {}
+    return payload["status"], None, payload
+
+
+def _finished(payload: Mapping) -> Tuple[Optional[float], Optional[float]]:
+    details = payload.get("details", {})
+    runtime = details.get("runtime", {}) if isinstance(details, dict) else {}
+    runtime = runtime if isinstance(runtime, dict) else {}
+    finished = None
+    for value in (runtime.get("finished_at_utc"), payload.get("timestamp_utc")):
+        try:
+            parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+            if parsed.tzinfo is not None:
+                finished = parsed.timestamp()
+                break
+        except (ValueError, OverflowError, OSError):
+            continue
+    seconds = runtime.get("duration_seconds")
+    duration = None
+    try:
+        if type(seconds) in (int, float) and math.isfinite(seconds) and seconds >= 0:
+            duration = float(seconds)
+    except OverflowError:
+        pass
+    return finished, duration
 
 
 def resource_snapshot(pids: Set[int]) -> dict:
@@ -344,17 +385,22 @@ def snapshot(config: Union[str, Path, Mapping]) -> dict:
     jobs, pids = _active_jobs(people, config_path, processes, runner)
     errors = process_errors + runner_errors + roster_errors + log_errors + report_errors
     stages = {stage: dict({key: 0 for key in COUNTERS}, total=len(people)) for stage in STAGES}
+    latest = {stage: {"participant_id": None, "finished": None, "duration_seconds": None} for stage in STAGES}
     overall = dict({key: 0 for key in COUNTERS}, total=len(people), incomplete=0)
     for person in people:
         states = []
         for stage in STAGES:
-            state, error = _status(derivatives / ("sub-" + person) / "status" / (stage + ".json"), person, stage)
+            state, error, payload = _status(derivatives / ("sub-" + person) / "status" / (stage + ".json"), person, stage)
             if error:
                 errors.append(error)
             if state != "unknown" and (stage, person) in jobs:
                 state = "running"
             if state is None:
                 state = "pending" if visible else "unknown"
+            if state in ("pass", "fail"):
+                finished, duration = _finished(payload)
+                if finished is not None and (latest[stage]["finished"] is None or finished > latest[stage]["finished"]):
+                    latest[stage] = {"participant_id": person, "finished": finished, "duration_seconds": duration}
             stages[stage][state] += 1
             states.append(state)
         category = ("unknown" if "unknown" in states else "running" if "running" in states else
@@ -368,12 +414,13 @@ def snapshot(config: Union[str, Path, Mapping]) -> dict:
     return {"timestamp_utc": datetime.now(timezone.utc).isoformat(timespec="seconds"),
             "config": str(config_path), "participants": str(participants), "derivatives": str(derivatives),
             "roster_state": roster_state, "main_log": log, "input_report": report,
-            "stages": stages, "overall": overall, "runner": runner, "process_visibility_complete": visible,
+            "stages": stages, "latest": latest, "execution": data.get("execution", {}),
+            "overall": overall, "runner": runner, "process_visibility_complete": visible,
             "active_jobs": [{"stage": stage, "participant_id": person} for stage, person in sorted(jobs)],
             "errors": errors, "resources": resource_snapshot(pids)}
 
 
-def format_snapshot(result: Mapping) -> str:
+def format_verbose_snapshot(result: Mapping) -> str:
     lines = ["LS | {}".format(result["timestamp_utc"]), "Results: {}".format(result["derivatives"]),
              "Runner: {} | PID={}".format(result["runner"]["status"], result["runner"]["pid"])]
     runner = result["runner"]
@@ -404,7 +451,10 @@ def format_snapshot(result: Mapping) -> str:
     if report.get("status") in ("pass", "fail"):
         lines.append("Input report: {} | errors={} | modified={}".format(
             report["status"], report["error_count"], report["mtime_utc"]))
-        lines.append("Report belongs to an unverified run; it may predate this worker and does not set runner status.")
+        if report.get("run_attribution") == "frozen_report_and_roster":
+            lines.append("Input report and roster match the frozen LS run manifest.")
+        else:
+            lines.append("Report belongs to an unverified run; it may predate this worker and does not set runner status.")
         lines.extend("  " + issue for issue in report["issues"])
     resources = result["resources"]
     lines.append("LS processes={} | CPU={} % (ps lifetime average) | RSS={} MiB".format(
@@ -419,18 +469,99 @@ def format_snapshot(result: Mapping) -> str:
     return "\n".join(lines)
 
 
+def _cell(value: object, width: int, right: bool = False) -> str:
+    text = _display_text(value)
+    used = sum(0 if unicodedata.combining(char) else 2 if unicodedata.east_asian_width(char) in ("W", "F") else 1 for char in text)
+    padding = " " * max(0, width - used)
+    return padding + text if right else text + padding
+
+
+def _duration(seconds: Optional[float]) -> str:
+    if seconds is None:
+        return "--"
+    if seconds < 60:
+        return "{:.1f}s".format(seconds)
+    total = int(seconds)
+    return "{}:{:02d}:{:02d}".format(total // 3600, total // 60 % 60, total % 60)
+
+
+def format_snapshot(result: Mapping, verbose: bool = False) -> str:
+    if verbose:
+        return format_verbose_snapshot(result)
+    headers = ("阶段", "步骤说明", "完成", "失败", "进行中", "等待", "未完成", "总数", "完成%", "未知", "最近结束ID", "耗时")
+    widths = (13, 14, 6, 6, 6, 6, 7, 6, 7, 6, 14, 9)
+
+    def row_text(values):
+        return " ".join(_cell(value, width, 2 <= index <= 9) for index, (value, width) in enumerate(zip(values, widths))).rstrip()
+
+    lines = [row_text(headers)]
+    for stage, name in zip(STAGES, STAGE_NAMES):
+        row = result["stages"][stage]
+        total, passed = row["total"], row["pass"]
+        count = lambda key: row[key] if row[key] is not None else "?"
+        recent = result.get("latest", {}).get(stage, {})
+        lines.append(row_text((stage, name, count("pass"), count("fail"), count("running"), count("pending"),
+                               total - passed if total is not None else "?", count("total"),
+                               "{:.1f}".format(passed * 100.0 / total) if total else "--", count("unknown"),
+                               recent.get("participant_id") or "--", _duration(recent.get("duration_seconds")))))
+    timestamp = datetime.fromisoformat(result["timestamp_utc"]).astimezone(timezone(timedelta(hours=8)))
+    lines.append("LS | " + timestamp.isoformat(timespec="seconds"))
+    ready = result.get("roster_state") == "ready"
+    lines.append("名单：{} | {}".format("正式参与者名单" if ready else "未就绪或读取异常（人数未知）", result["participants"]))
+    lines.append("结果：" + str(result["derivatives"]))
+    execution = result.get("execution", {})
+    lines.append("配置：CPU={}核；重任务={}线程，配准={}线程；GPU={}，每卡{}槽；滚动窗口={}".format(
+        *(execution.get(key, "未知") for key in ("cpu_cores", "cpu_threads_per_job", "registration_threads",
+                                               "gpu_devices", "gpu_slots_per_device", "max_parallel_jobs"))))
+    overall = result["overall"]
+    report = result.get("input_report", {})
+    counts = report.get("counts", {})
+    trusted = (ready and report.get("status") == "pass" and report.get("run_attribution") == "frozen_report_and_roster"
+               and counts.get("participants_count") == overall["total"])
+    lines.append("实际纳入={} | 缺模态跳过={} | 缺T1={} | 缺FLAIR={}".format(
+        overall["total"] if ready else "未知", *(counts.get(key) if trusted and counts.get(key) is not None else "未知"
+            for key in ("excluded_subject_count", "missing_t1w_count", "missing_flair_count"))))
+    if not trusted:
+        lines.append("准备报告：{}；跳过人数待核实（报告记录={}；更新时间={}）".format(
+            report.get("status", "未知"), counts.get("excluded_subject_count") if counts.get("excluded_subject_count") is not None else "未知", report.get("mtime_utc") or "未知"))
+    lines.append("总例数={} | 八步全部完成={} | 进行中={} | 有失败={} | 其余等待={} | 未知={} | 未完成={}".format(
+        *(overall[key] if overall[key] is not None else "?" for key in ("total", "pass", "running", "fail", "pending", "unknown", "incomplete"))))
+    runner = result["runner"]
+    label = {"running": "运行", "exited": "已退出", "not_running": "未启动", "stale_pid": "PID身份不符", "unknown": "无法确认"}.get(runner["status"], "无法确认")
+    lines.append("LS入口：{} | PID={} | 进程状态={} | 累计CPU秒={}".format(
+        label, runner.get("pid") or "--", runner.get("state") or "--", runner.get("cpu_seconds") if runner.get("cpu_seconds") is not None else "未知"))
+    log = result.get("main_log", {})
+    if log.get("lines") and (not result["active_jobs"] or report.get("status") == "fail"):
+        lines.append("最近日志：" + log["lines"][-1])
+    if report.get("status") == "fail":
+        lines.extend("输入错误：" + issue for issue in report.get("issues", []))
+    if result["errors"]:
+        lines.append("读取/身份异常={}：{}".format(len(result["errors"]), "；".join(result["errors"][:2])))
+    resources = result["resources"]
+    lines.append("LS进程={} | CPU={} %（进程累计均值）| RSS={} MiB".format(
+        *(resources[key] if resources[key] is not None else "未知" for key in ("ls_process_count", "ls_cpu_percent", "ls_rss_mib"))))
+    if resources["gpus"]:
+        lines.append("全机GPU：" + " | ".join("卡{index} 利用率{utilization_percent}% 显存{memory_used_mib}/{memory_total_mib} MiB".format(**gpu) for gpu in resources["gpus"]))
+    lines.append("完成=通过；未完成=总数-完成（含失败/未知）；最近ID及耗时来自该阶段最近结束记录；缺模态两项可重叠。")
+    return "\n".join(lines)
+
+
 def main(argv: Optional[Sequence[str]] = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", required=True, help="Absolute path to config_LS.yaml")
+    parser.add_argument("--verbose", action="store_true", help="Show the detailed diagnostic view instead of the compact Chinese table")
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument("--once", action="store_true", help="Print one snapshot (default)")
     mode.add_argument("--interval", type=float, help="Repeat every N seconds; must be positive")
     args = parser.parse_args(argv)
-    if args.interval is not None and args.interval <= 0:
+    if args.interval is not None and (not math.isfinite(args.interval) or args.interval <= 0):
         parser.error("--interval must be greater than zero")
     try:
         while True:
-            print(format_snapshot(snapshot(args.config)), flush=True)
+            output = format_snapshot(snapshot(args.config), verbose=args.verbose)
+            if args.interval is not None and sys.stdout.isatty():
+                print("\033[2J\033[H", end="")
+            print(output, flush=True)
             if args.interval is None:
                 return 0
             time.sleep(args.interval)

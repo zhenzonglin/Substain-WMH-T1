@@ -1,6 +1,7 @@
 """LS monitor isolation and truthful counting regression tests."""
 
 import importlib.util
+import hashlib
 import json
 import tempfile
 import unittest
@@ -181,7 +182,7 @@ class MonitorTests(unittest.TestCase):
         self.assertTrue(all(value is None for value in result["overall"].values()))
         self.assertTrue(all(value is None for row in result["stages"].values() for value in row.values()))
         self.assertEqual(result["resources"]["pids"], [50])
-        output = monitor.format_snapshot(result)
+        output = monitor.format_verbose_snapshot(result)
         self.assertIn("waiting for preparation", output)
         self.assertIn("CPU seconds=34.5", output)
         self.assertNotIn("ALL_SUBJECTS", output)
@@ -206,7 +207,7 @@ class MonitorTests(unittest.TestCase):
         self.participants.unlink()
         result = monitor.snapshot(self.config)
         self.assertEqual(result["runner"]["status"], "not_running")
-        self.assertIn("does not confirm active preparation", monitor.format_snapshot(result))
+        self.assertIn("does not confirm active preparation", monitor.format_verbose_snapshot(result))
         self.assertIsNone(result["overall"]["total"])
 
     def test_roster_permission_error_is_unknown_and_keeps_runner(self):
@@ -228,7 +229,7 @@ class MonitorTests(unittest.TestCase):
         result = monitor.snapshot(self.config)
         self.assertEqual(result["roster_state"], "unknown")
         self.assertIsNone(result["overall"]["total"])
-        self.assertIn("counts: unknown", monitor.format_snapshot(result))
+        self.assertIn("counts: unknown", monitor.format_verbose_snapshot(result))
 
     def test_main_log_tail_is_bounded_and_reports_preparation(self):
         self.participants.unlink()
@@ -265,7 +266,7 @@ class MonitorTests(unittest.TestCase):
         self.assertEqual(result["input_report"]["error_count"], 2)
         self.assertIsNotNone(result["input_report"]["mtime_utc"])
         self.assertEqual(result["input_report"]["run_attribution"], "unverified")
-        output = monitor.format_snapshot(result)
+        output = monitor.format_verbose_snapshot(result)
         self.assertIn("P0005: missing T1", output)
         self.assertIn("may predate this worker", output)
 
@@ -284,9 +285,9 @@ class MonitorTests(unittest.TestCase):
                 patch.object(monitor.time, "sleep", side_effect=next_poll), patch("builtins.print") as printed:
             self.assertEqual(monitor.main(["--config", str(self.config_path), "--interval", "1"]), 0)
         output = [call.args[0] for call in printed.call_args_list if call.args]
-        self.assertIn("Participant roster: not_ready", output[0])
-        self.assertIn("Participant roster: ready", output[1])
-        self.assertIn("ALL_SUBJECTS", output[1])
+        self.assertIn("未就绪或读取异常", output[0])
+        self.assertIn("正式参与者名单", output[1])
+        self.assertIn("八步全部完成=", output[1])
 
     def test_missing_optional_process_telemetry_remains_unknown(self):
         self.participants.unlink()
@@ -337,6 +338,96 @@ class MonitorTests(unittest.TestCase):
         self.assertEqual(processes[0]["pid"], 50)
         self.assertIsNone(processes[0]["read_bytes"])
         self.assertIsNone(processes[0]["rchar"])
+
+    def timed_status(self, person, when, seconds, state="pass"):
+        return self.status(person, "t1", payload={"participant_id": person, "stage": "t1", "status": state,
+            "timestamp_utc": when, "details": {"runtime": {"finished_at_utc": when, "duration_seconds": seconds}}})
+
+    def test_latest_finish_uses_time_not_id_and_skips_active_retry(self):
+        self.people("P0001", "P0005", "P0009")
+        self.timed_status("P0009", "2026-10-17T00:00:00Z", 12)
+        self.timed_status("P0005", "2026-10-17T01:00:00Z", 90, "fail")
+        self.timed_status("P0001", "2026-10-17T02:00:00Z", 800, "fail")
+        self.processes = [self.stage(51, "P0001", config=self.config_path)]
+        result = monitor.snapshot(self.config)
+        self.assertEqual(result["latest"]["t1"]["participant_id"], "P0005")
+        self.assertEqual(result["latest"]["t1"]["duration_seconds"], 90)
+        row = next(line for line in monitor.format_snapshot(result).splitlines() if line.startswith("t1 "))
+        self.assertIn("P0005", row)
+        self.assertIn("0:01:30", row)
+        self.assertEqual(result["stages"]["t1"]["running"], 1)
+
+    def test_bad_runtime_metadata_does_not_hide_valid_stage_or_invent_duration(self):
+        self.people("P0001")
+        for seconds in (None, -1, float('nan'), float('inf'), "fast", True, 10 ** 1000):
+            self.timed_status("P0001", "not a timestamp", seconds)
+            result = monitor.snapshot(self.config)
+            self.assertEqual(result["stages"]["t1"]["pass"], 1)
+            self.assertIsNone(result["latest"]["t1"]["participant_id"])
+        self.timed_status("P0001", "2026-10-17T02:00:00Z", -1)
+        result = monitor.snapshot(self.config)
+        self.assertEqual(result["latest"]["t1"]["participant_id"], "P0001")
+        self.assertIsNone(result["latest"]["t1"]["duration_seconds"])
+
+    def input_counts(self, freeze=True):
+        prep = self.root / "preparation_LS"
+        prep.mkdir()
+        self.config["ls"]["preparation_dir"] = str(prep)
+        report = prep / "input_report_LS.json"
+        report.write_text(json.dumps({"status": "pass", "issues": [], "image_subject_count": 8,
+            "participants_count": 5, "excluded_subject_count": 3, "missing_t1w_count": 2, "missing_flair_count": 2}))
+        if freeze:
+            (self.logs / "run_manifest_LS.json").write_text(json.dumps({"cohort": "LS", "files": {
+                str(path): hashlib.sha256(path.read_bytes()).hexdigest() for path in (report, self.participants)}}))
+        return report
+
+    def test_frozen_counts_and_compact_chinese_columns_read_only(self):
+        self.input_counts()
+        self.config["execution"] = dict(cpu_cores=64, cpu_threads_per_job=4, registration_threads=8,
+                                        gpu_devices=["0", "1"], gpu_slots_per_device=2, max_parallel_jobs=200)
+        for stage in monitor.STAGES:
+            self.status("P0001", stage)
+        self.timed_status("P0001", "2026-10-17T02:00:00Z", 80864)
+        before = {str(path): (path.read_bytes(), path.stat().st_mtime_ns) for path in self.root.rglob('*') if path.is_file()}
+        result = monitor.snapshot(self.config)
+        output = monitor.format_snapshot(result)
+        self.assertEqual(result["input_report"]["run_attribution"], "frozen_report_and_roster")
+        for text in ("实际纳入=5 | 缺模态跳过=3 | 缺T1=2 | 缺FLAIR=2", "CPU=64核；重任务=4线程，配准=8线程",
+                     "八步全部完成=1", "未完成=4", "22:27:44", "+08:00"):
+            self.assertIn(text, output)
+        for text in ("完成", "失败", "进行中", "等待", "未完成", "总数", "完成%", "未知", "最近结束ID", "耗时"):
+            self.assertIn(text, output.splitlines()[0])
+        for stage in monitor.STAGES:
+            self.assertEqual(sum(line.startswith(stage + ' ') for line in output.splitlines()), 1)
+        self.assertIn("20.0", next(line for line in output.splitlines() if line.startswith('t1 ')))
+        self.assertEqual(before, {str(path): (path.read_bytes(), path.stat().st_mtime_ns) for path in self.root.rglob('*') if path.is_file()})
+
+    def test_changed_report_or_roster_does_not_claim_current_skip_count(self):
+        report = self.input_counts()
+        original = report.read_bytes()
+        report.write_bytes(original + b' ')
+        output = monitor.format_snapshot(monitor.snapshot(self.config))
+        self.assertIn("缺模态跳过=未知", output)
+        self.assertIn("报告记录=3", output)
+        report.write_bytes(original)
+        self.people("P0001", "P0005", "P0009", "P0010", "P9999")
+        self.assertIn("缺模态跳过=未知", monitor.format_snapshot(monitor.snapshot(self.config)))
+
+    def test_missing_roster_compact_table_has_unknown_counts(self):
+        self.input_counts()
+        self.participants.unlink()
+        output = monitor.format_snapshot(monitor.snapshot(self.config))
+        self.assertIn("实际纳入=未知", output)
+        self.assertIn("缺模态跳过=未知", output)
+        self.assertIn("总例数=?", output)
+        self.assertIn("?", next(line for line in output.splitlines() if line.startswith("skullstrip ")))
+
+    def test_chinese_cell_alignment_and_duration(self):
+        self.assertEqual(monitor._cell("配准", 6), "配准  ")
+        self.assertEqual(monitor._cell("完成", 6, True), "  完成")
+        self.assertEqual(monitor._duration(51.4), "51.4s")
+        self.assertEqual(monitor._duration(None), "--")
+        self.assertEqual(monitor._duration(744), "0:12:24")
 
 
 if __name__ == "__main__":

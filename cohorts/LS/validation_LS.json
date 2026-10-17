@@ -4,9 +4,9 @@
   "branch": "codex/ls-cohort-install",
   "status": "local_validation_passed",
   "runtime": "Linux / Python 3.8.10 / Snakemake 7.32.4",
-  "test_command": "PYTHONDONTWRITEBYTECODE=1 python -m pytest -q -o addopts= -p no:cacheprovider cohorts/LS/tests/test_inputs_LS.py cohorts/LS/tests/test_missing_modalities_patch_LS.py cohorts/LS/tests/test_deployment_LS.py::test_missing_p0001_is_recorded_and_old_runner_selects_complete_pilot",
-  "validation_scope": "targeted missing-modality and named results-directory exclusion; single-file preparation recovery",
-  "tests_passed": 54,
+  "test_command": "PYTHONDONTWRITEBYTECODE=1 python -m pytest -q -o addopts= -p no:cacheprovider cohorts/LS/tests/test_monitor_LS.py cohorts/LS/tests/test_checkout_integrity_LS.py cohorts/LS/tests/test_distribution_LS.py",
+  "validation_scope": "external read-only compact Chinese monitor; no installed analysis runtime changes",
+  "tests_passed": 34,
   "tests_failed": 0,
   "tests_skipped": 0,
   "test_fixtures_self_contained": true,
@@ -32,11 +32,15 @@
     "Existing runner selects an included pilot and freezes the exclusion audit",
     "Preparation-only updater backs up the old module and reports; refuses frozen/running/modified installations",
     "Exact PRECISE_Thickness_GMV_QC_results directory skipped, recorded, unchanged and excluded from participant counts",
-    "Other invalid P-prefixed directories still block; original and missing-modality adapter versions can upgrade"
+    "Other invalid P-prefixed directories still block; original and missing-modality adapter versions can upgrade",
+    "Compact Chinese eight-stage table with Unicode column widths, counts, completion percent, latest finished ID and duration",
+    "Frozen input report and roster checksums required before displaying current skipped-subject counts",
+    "Latest completion uses validated status times, excluding active retries; invalid duration metadata remains unknown"
   ],
   "workstation_connected": false,
   "workstation_result_validation": "not_performed_by_this_test_run",
   "note": "Tests use synthetic data and repository-contained source fixtures; real cohort counts and model execution are validated on the workstation.",
-  "changed_workstation_runtime_files": 1,
+  "changed_workstation_runtime_files": 0,
+  "previous_input_exclusion_tests_passed": 54,
   "previous_monitor_fix_tests_passed": 28
 }
