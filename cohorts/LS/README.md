@@ -41,6 +41,18 @@ bash /data02/linzhenzong/Substain_GB/scripts/prepare_LS.sh
 
 ## 独立监测与续跑
 
+已经启动分析、需要更新监测器时，在 Git 克隆目录运行下列命令。新版监测器直接读取已安装的 LS 配置，不改写安装目录、运行指纹或分析进程：
+
+```bash
+cd /data02/linzhenzong/Substain_LS_installer
+git pull --ff-only
+bash cohorts/LS/monitor_LS.sh --interval 30
+```
+
+首次准备需要读取 Excel、匹配影像并完成输入 SHA256，`participants_LS.tsv` 在验证完成后才发布。名单尚未生成时，新版显示“名册未就绪”、可核实的进程状态及日志，而不会虚报0名被试或直接退出；名单出现后自动切换八阶段统计。`D` 通常表示等待 I/O，不能仅凭一次采样认定卡死。
+
+安装目录中的监测入口适用于已安装的版本：
+
 一次快照：
 
 ```bash

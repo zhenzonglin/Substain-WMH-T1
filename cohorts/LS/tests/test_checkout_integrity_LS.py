@@ -80,3 +80,26 @@ def test_shell_install_from_unrelated_directory_verifies_then_invokes_existing_p
     failure = subprocess.run(['bash', str(root / 'install_LS.sh')], cwd=str(unrelated), env=env,
                              text=True, capture_output=True)
     assert failure.returncode != 0 and not record.exists()
+
+
+@pytest.mark.skipif(os.name == 'nt', reason='Workstation monitor entrypoint is Linux Bash')
+def test_checkout_monitor_invokes_external_code_without_changing_installed_runtime(tmp_path):
+    root = source_tree(tmp_path)
+    shutil.copyfile(str(PACKAGE / 'monitor_LS.sh'), str(root / 'monitor_LS.sh'))
+    project = tmp_path / 'existing GB'
+    python = project / 'envs/core-venv/bin/python'
+    python.parent.mkdir(parents=True)
+    record = tmp_path / 'monitor_invocation.txt'
+    python.write_text('#!' + sys.executable + '\nimport os,sys\nfrom pathlib import Path\n'
+                      'Path(os.environ["LS_TEST_INVOCATION"]).write_text("\\n".join(sys.argv[1:]))\n')
+    python.chmod(0o755)
+    installed = project / 'scripts/cohort_LS/monitor_LS.py'
+    installed.parent.mkdir(parents=True)
+    installed.write_text('# previously installed frozen monitor\n')
+    before = {str(p): p.read_bytes() for p in project.rglob('*') if p.is_file()}
+    env = dict(os.environ, SUBSTAIN_PROJECT_ROOT=str(project), LS_TEST_INVOCATION=str(record))
+    subprocess.run(['bash', str(root / 'monitor_LS.sh'), '--interval', '30'], cwd=str(tmp_path), env=env,
+                   text=True, capture_output=True, check=True)
+    assert record.read_text().splitlines() == [str(root / 'monitor_LS.py'), '--config',
+                                              str(project / 'config/config_LS.yaml'), '--interval', '30']
+    assert {str(p): p.read_bytes() for p in project.rglob('*') if p.is_file()} == before

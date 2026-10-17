@@ -6,6 +6,7 @@ import csv
 import json
 import os
 import re
+import stat
 import subprocess
 import sys
 import time
@@ -69,14 +70,27 @@ def read_processes() -> Tuple[List[dict], bool, List[str]]:
     except OSError as exc:
         return [], False, ["Process visibility unavailable: {}".format(exc)]
     complete = True
+    try:
+        clock_ticks = os.sysconf("SC_CLK_TCK")
+    except (AttributeError, OSError, ValueError):
+        clock_ticks = None
     for entry in entries:
         if not entry.name.isdigit():
             continue
         try:
             fields = (entry / "stat").read_text().rsplit(")", 1)[1].split()
             argv = [os.fsdecode(value) for value in (entry / "cmdline").read_bytes().split(b"\0") if value]
-            result.append({"pid": int(entry.name), "ppid": int(fields[1]), "pgid": int(fields[2]),
-                           "start_ticks": int(fields[19]), "state": fields[0], "argv": argv})
+            process = {"pid": int(entry.name), "ppid": int(fields[1]), "pgid": int(fields[2]),
+                       "start_ticks": int(fields[19]), "state": fields[0], "argv": argv,
+                       "cpu_seconds": ((int(fields[11]) + int(fields[12])) / float(clock_ticks)
+                                       if clock_ticks else None), "read_bytes": None, "rchar": None}
+            try:
+                io = dict(line.split(":", 1) for line in (entry / "io").read_text().splitlines())
+                for key in ("read_bytes", "rchar"):
+                    process[key] = int(io[key])
+            except (OSError, ValueError, KeyError):
+                pass  # Optional telemetry failure must not hide a verified process.
+            result.append(process)
         except (FileNotFoundError, ProcessLookupError):
             continue  # A process may exit between the directory scan and reading stat.
         except (OSError, ValueError, IndexError):
@@ -106,7 +120,8 @@ def _config_context(argv: Sequence[str], config_path: Path) -> Optional[bool]:
 
 
 def _runner_state(log_dir: Path, config_path: Path, processes: Mapping[int, dict]) -> Tuple[dict, List[str]]:
-    state = {"status": "not_running", "pid": None, "pgid": None}
+    state = {"status": "not_running", "pid": None, "pgid": None, "state": None,
+             "cpu_seconds": None, "read_bytes": None, "rchar": None, "started_at": None}
     errors = []
     metadata_path = log_dir / "full_run_LS.json"
     pid_path = log_dir / "full_run_LS.pid"
@@ -138,7 +153,7 @@ def _runner_state(log_dir: Path, config_path: Path, processes: Mapping[int, dict
             raise ValueError("LS PID and JSON pointers disagree")
     except (KeyError, TypeError, OSError, ValueError, UnicodeError) as exc:
         return dict(state, status="unknown"), ["Invalid LS runner identity: {}".format(exc)]
-    state.update(pid=pid, pgid=pgid)
+    state.update(pid=pid, pgid=pgid, started_at=metadata.get("started_at"))
     process = processes.get(pid)
     if process is None:
         return dict(state, status="exited"), errors
@@ -147,7 +162,82 @@ def _runner_state(log_dir: Path, config_path: Path, processes: Mapping[int, dict
     if (process["start_ticks"] != start_ticks or process["pgid"] != pgid or
             _config_context(argv, config_path) is not True or not runner_matches or "worker" not in argv):
         return dict(state, status="stale_pid"), ["Recorded PID has a different identity; it is not counted as LS"]
+    for key in ("state", "cpu_seconds", "read_bytes", "rchar"):
+        state[key] = process.get(key)
     return dict(state, status="running"), errors
+
+
+def _display_text(value: object, limit: int = 500) -> str:
+    return "".join(char if char.isprintable() else " " for char in str(value))[:limit]
+
+
+def _log_tail(log_dir: Path) -> Tuple[dict, List[str]]:
+    """Bounded reads of the LS main log only; never follow a pointer outside log_dir."""
+    result = {"status": "not_ready", "path": None, "mtime_utc": None, "lines": []}
+    try:
+        pointer = (log_dir / "full_run_LS.logpath").resolve()
+        pointer.relative_to(log_dir)
+        if not stat.S_ISREG(pointer.stat().st_mode):
+            raise ValueError("LS log pointer is not a regular file")
+        with pointer.open("rb") as handle:
+            if not stat.S_ISREG(os.fstat(handle.fileno()).st_mode):
+                raise ValueError("LS log pointer is not a regular file")
+            content = handle.read(4097)
+        if len(content) > 4096:
+            raise ValueError("LS log pointer exceeds 4096 bytes")
+        path = _absolute(content.decode("utf-8").strip(), "LS log pointer")
+        path.relative_to(log_dir)
+        result["path"] = str(path)
+        if not stat.S_ISREG(path.stat().st_mode):
+            raise ValueError("LS main log is not a regular file")
+        with path.open("rb") as handle:
+            details = os.fstat(handle.fileno())
+            if not stat.S_ISREG(details.st_mode):
+                raise ValueError("LS main log is not a regular file")
+            offset = max(0, details.st_size - 8192)
+            handle.seek(offset)
+            tail = handle.read(8192).decode("utf-8", errors="replace").splitlines()
+        if offset and tail:
+            tail = tail[1:]  # The first line may have been cut in the middle.
+        result.update(status="available", mtime_utc=datetime.fromtimestamp(details.st_mtime, timezone.utc).isoformat(),
+                      lines=[_display_text(line) for line in tail[-3:]])
+        return result, []
+    except FileNotFoundError:
+        return result, []
+    except (OSError, ValueError, UnicodeError) as exc:
+        return dict(result, status="unknown"), ["Cannot read LS main log: {}".format(exc)]
+
+
+def _input_report(data: Mapping) -> Tuple[dict, List[str]]:
+    result = {"status": "not_ready", "path": None, "mtime_utc": None,
+              "error_count": None, "issues": [], "run_attribution": "unverified"}
+    prep = data["ls"].get("preparation_dir")
+    if not prep:
+        return result, []
+    try:
+        path = _absolute(prep, "ls.preparation_dir") / "input_report_LS.json"
+        result["path"] = str(path)
+        if not stat.S_ISREG(path.stat().st_mode):
+            raise ValueError("LS input report is not a regular file")
+        with path.open("rb") as handle:
+            details = os.fstat(handle.fileno())
+            payload = handle.read(2 * 1024 * 1024 + 1)
+        if len(payload) > 2 * 1024 * 1024:
+            raise ValueError("input report exceeds the 2 MiB monitor read limit")
+        report = json.loads(payload)
+        if (not isinstance(report, dict) or report.get("status") not in ("pass", "fail") or
+                not isinstance(report.get("issues"), list)):
+            raise ValueError("invalid input report")
+        issues = [issue for issue in report["issues"] if isinstance(issue, dict) and issue.get("severity") == "error"]
+        result.update(status=report["status"], mtime_utc=datetime.fromtimestamp(details.st_mtime, timezone.utc).isoformat(),
+                      error_count=len(issues), issues=[_display_text("{}: {}".format(
+                          issue.get("participant_id") or issue.get("code", "input"), issue.get("message", "")))
+                          for issue in issues[:3]])
+        return result, []
+    except FileNotFoundError:
+        return result, []
+    except (OSError, ValueError, UnicodeError) as exc:
+        return dict(result, status="unknown"), ["Cannot read LS input report: {}".format(exc)]
 
 
 def _active_jobs(people: Sequence[str], config_path: Path, processes: Sequence[dict], runner: dict
@@ -236,14 +326,23 @@ def snapshot(config: Union[str, Path, Mapping]) -> dict:
     participants = _absolute(data.get("participants"), "participants")
     derivatives = _absolute(data.get("derivatives"), "derivatives")
     log_dir = _absolute(data["ls"].get("log_dir"), "ls.log_dir")
-    people = _roster(participants)
     processes, visible, process_errors = read_processes()
     live = {process["pid"]: process for process in processes if process["state"] not in ("Z", "X")}
     runner, runner_errors = _runner_state(log_dir, config_path, live)
     if not visible and runner["status"] == "exited":
         runner["status"] = "unknown"
+    people, roster_state, roster_errors = [], "ready", []
+    try:
+        people = _roster(participants)
+    except FileNotFoundError:
+        roster_state = "not_ready"
+    except (OSError, ValueError, UnicodeError) as exc:
+        roster_state = "unknown"
+        roster_errors.append("Cannot read LS participant roster: {}".format(exc))
+    log, log_errors = _log_tail(log_dir)
+    report, report_errors = _input_report(data)
     jobs, pids = _active_jobs(people, config_path, processes, runner)
-    errors = process_errors + runner_errors
+    errors = process_errors + runner_errors + roster_errors + log_errors + report_errors
     stages = {stage: dict({key: 0 for key in COUNTERS}, total=len(people)) for stage in STAGES}
     overall = dict({key: 0 for key in COUNTERS}, total=len(people), incomplete=0)
     for person in people:
@@ -262,8 +361,13 @@ def snapshot(config: Union[str, Path, Mapping]) -> dict:
                     "fail" if "fail" in states else "pass" if all(state == "pass" for state in states) else "pending")
         overall[category] += 1
     overall["incomplete"] = len(people) - overall["pass"]
+    if roster_state != "ready":
+        # No roster means unknown population size, never an empty successful cohort.
+        stages = {stage: {key: None for key in ("total",) + COUNTERS} for stage in STAGES}
+        overall = {key: None for key in ("total", "incomplete") + COUNTERS}
     return {"timestamp_utc": datetime.now(timezone.utc).isoformat(timespec="seconds"),
             "config": str(config_path), "participants": str(participants), "derivatives": str(derivatives),
+            "roster_state": roster_state, "main_log": log, "input_report": report,
             "stages": stages, "overall": overall, "runner": runner, "process_visibility_complete": visible,
             "active_jobs": [{"stage": stage, "participant_id": person} for stage, person in sorted(jobs)],
             "errors": errors, "resources": resource_snapshot(pids)}
@@ -271,13 +375,37 @@ def snapshot(config: Union[str, Path, Mapping]) -> dict:
 
 def format_snapshot(result: Mapping) -> str:
     lines = ["LS | {}".format(result["timestamp_utc"]), "Results: {}".format(result["derivatives"]),
-             "Runner: {} | PID={}".format(result["runner"]["status"], result["runner"]["pid"]),
-             "{:<14} {:>7} {:>7} {:>7} {:>8} {:>8} {:>8}".format("stage", "total", "pass", "fail", "running", "pending", "unknown")]
-    for stage in STAGES + ("ALL_SUBJECTS",):
-        row = result["overall"] if stage == "ALL_SUBJECTS" else result["stages"][stage]
-        lines.append("{:<14} {:>7} {:>7} {:>7} {:>8} {:>8} {:>8}".format(stage, row["total"], *(row[key] for key in COUNTERS)))
-    lines.append("Incomplete subjects: {} (all subjects minus 8-stage pass; includes failed subjects)".format(result["overall"]["incomplete"]))
-    lines.append("Counts are exclusive; active retries supersede old pass/fail, unreadable states stay unknown.")
+             "Runner: {} | PID={}".format(result["runner"]["status"], result["runner"]["pid"])]
+    runner = result["runner"]
+    if runner["status"] == "running":
+        lines.append("Verified runner: state={} | CPU seconds={} | read_bytes={} | rchar={}".format(
+            *(runner.get(key) for key in ("state", "cpu_seconds", "read_bytes", "rchar"))))
+    roster_state = result.get("roster_state", "ready")
+    lines.append("Participant roster: {} | {}".format(roster_state, result["participants"]))
+    if roster_state == "ready":
+        lines.append("{:<14} {:>7} {:>7} {:>7} {:>8} {:>8} {:>8}".format(
+            "stage", "total", "pass", "fail", "running", "pending", "unknown"))
+        for stage in STAGES + ("ALL_SUBJECTS",):
+            row = result["overall"] if stage == "ALL_SUBJECTS" else result["stages"][stage]
+            lines.append("{:<14} {:>7} {:>7} {:>7} {:>8} {:>8} {:>8}".format(stage, row["total"], *(row[key] for key in COUNTERS)))
+        lines.append("Incomplete subjects: {} (all subjects minus 8-stage pass; includes failed subjects)".format(result["overall"]["incomplete"]))
+        lines.append("Counts are exclusive; active retries supersede old pass/fail, unreadable states stay unknown.")
+    else:
+        lines.append("Cohort and eight-stage counts: unknown (roster unavailable; no zero counts inferred).")
+        if roster_state == "not_ready" and runner["status"] == "running":
+            lines.append("LS worker is active; waiting for preparation to publish participants_LS.tsv.")
+        elif roster_state == "not_ready":
+            lines.append("Roster has not been published; runner status above does not confirm active preparation.")
+    log = result.get("main_log", {})
+    if log.get("status") == "available":
+        lines.append("Main log: {} | modified={}".format(log["path"], log["mtime_utc"]))
+        lines.extend("  " + line for line in log["lines"])
+    report = result.get("input_report", {})
+    if report.get("status") in ("pass", "fail"):
+        lines.append("Input report: {} | errors={} | modified={}".format(
+            report["status"], report["error_count"], report["mtime_utc"]))
+        lines.append("Report belongs to an unverified run; it may predate this worker and does not set runner status.")
+        lines.extend("  " + issue for issue in report["issues"])
     resources = result["resources"]
     lines.append("LS processes={} | CPU={} % (ps lifetime average) | RSS={} MiB".format(
         resources["ls_process_count"], resources["ls_cpu_percent"], resources["ls_rss_mib"]))

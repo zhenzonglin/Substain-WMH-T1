@@ -33,7 +33,9 @@ class MonitorTests(unittest.TestCase):
         self.process_patch = patch.object(monitor, "read_processes", side_effect=lambda: (self.processes, self.visible, []))
         self.process_patch.start()
         self.addCleanup(self.process_patch.stop)
-        self.resource_patch = patch.object(monitor, "resource_snapshot", side_effect=lambda pids: {"pids": sorted(pids)})
+        self.resource_patch = patch.object(monitor, "resource_snapshot", side_effect=lambda pids: {
+            "pids": sorted(pids), "ls_process_count": len(pids), "ls_cpu_percent": None,
+            "ls_rss_mib": None, "gpus": []})
         self.resource_patch.start()
         self.addCleanup(self.resource_patch.stop)
 
@@ -144,8 +146,10 @@ class MonitorTests(unittest.TestCase):
 
     def test_duplicate_roster_is_not_silently_deduplicated(self):
         self.people("P0001", "P0001")
-        with self.assertRaisesRegex(ValueError, "duplicate"):
-            monitor.snapshot(self.config)
+        result = monitor.snapshot(self.config)
+        self.assertEqual(result["roster_state"], "unknown")
+        self.assertIsNone(result["overall"]["total"])
+        self.assertTrue(any("duplicate" in error for error in result["errors"]))
 
     def test_bad_runner_json_is_reported(self):
         self.people("P0001")
@@ -161,6 +165,178 @@ class MonitorTests(unittest.TestCase):
         result = monitor.snapshot(self.config)
         self.assertEqual(result["overall"]["running"], 1)
         self.assertEqual(result["stages"]["wmh_seg"]["fail"], 0)
+
+    def test_missing_roster_preserves_active_runner_and_unknown_counts(self):
+        self.participants.unlink()
+        process = self.master()
+        process.update(state="D", cpu_seconds=34.5, read_bytes=4096, rchar=8192)
+        self.processes = [process]
+        result = monitor.snapshot(self.config)
+        self.assertEqual(result["roster_state"], "not_ready")
+        self.assertEqual(result["runner"]["status"], "running")
+        self.assertEqual(result["runner"]["state"], "D")
+        self.assertEqual(result["runner"]["cpu_seconds"], 34.5)
+        self.assertEqual(result["runner"]["read_bytes"], 4096)
+        self.assertEqual(result["runner"]["rchar"], 8192)
+        self.assertTrue(all(value is None for value in result["overall"].values()))
+        self.assertTrue(all(value is None for row in result["stages"].values() for value in row.values()))
+        self.assertEqual(result["resources"]["pids"], [50])
+        output = monitor.format_snapshot(result)
+        self.assertIn("waiting for preparation", output)
+        self.assertIn("CPU seconds=34.5", output)
+        self.assertNotIn("ALL_SUBJECTS", output)
+
+    def test_missing_roster_exited_unknown_stale_and_zombie_runner(self):
+        self.participants.unlink()
+        process = self.master()
+        self.assertEqual(monitor.snapshot(self.config)["runner"]["status"], "exited")
+        self.visible = False
+        self.assertEqual(monitor.snapshot(self.config)["runner"]["status"], "unknown")
+        self.visible = True
+        process["start_ticks"] += 1
+        self.processes = [process]
+        result = monitor.snapshot(self.config)
+        self.assertEqual(result["runner"]["status"], "stale_pid")
+        self.assertIsNone(result["runner"]["cpu_seconds"])
+        process["start_ticks"] -= 1
+        process["state"] = "Z"
+        self.assertEqual(monitor.snapshot(self.config)["runner"]["status"], "exited")
+
+    def test_missing_roster_without_runner_does_not_claim_preparing(self):
+        self.participants.unlink()
+        result = monitor.snapshot(self.config)
+        self.assertEqual(result["runner"]["status"], "not_running")
+        self.assertIn("does not confirm active preparation", monitor.format_snapshot(result))
+        self.assertIsNone(result["overall"]["total"])
+
+    def test_roster_permission_error_is_unknown_and_keeps_runner(self):
+        self.processes = [self.master()]
+        original = Path.open
+        def selective_open(path, *args, **kwargs):
+            if path == self.participants:
+                raise PermissionError("denied roster")
+            return original(path, *args, **kwargs)
+        with patch.object(Path, "open", selective_open):
+            result = monitor.snapshot(self.config)
+        self.assertEqual(result["roster_state"], "unknown")
+        self.assertEqual(result["runner"]["status"], "running")
+        self.assertIsNone(result["overall"]["total"])
+        self.assertTrue(any("denied roster" in error for error in result["errors"]))
+
+    def test_bad_roster_keeps_monitor_available(self):
+        self.participants.write_text("wrong_column\nP0001\n", encoding="utf-8")
+        result = monitor.snapshot(self.config)
+        self.assertEqual(result["roster_state"], "unknown")
+        self.assertIsNone(result["overall"]["total"])
+        self.assertIn("counts: unknown", monitor.format_snapshot(result))
+
+    def test_main_log_tail_is_bounded_and_reports_preparation(self):
+        self.participants.unlink()
+        log = self.logs / "current_full_run_LS.log"
+        log.write_text("x" * 20000 + "\nold\nLS prepare: read Excel, match all image directories and hash inputs\n", encoding="utf-8")
+        (self.logs / "full_run_LS.logpath").write_text(str(log), encoding="utf-8")
+        self.processes = [self.master()]
+        result = monitor.snapshot(self.config)
+        self.assertEqual(result["main_log"]["status"], "available")
+        self.assertLessEqual(len(result["main_log"]["lines"]), 3)
+        self.assertTrue(all(len(line) <= 500 for line in result["main_log"]["lines"]))
+        self.assertIn("LS prepare: read Excel", monitor.format_snapshot(result))
+
+    def test_main_log_outside_ls_directory_is_refused(self):
+        log = self.root / "private.log"
+        log.write_text("must not be read", encoding="utf-8")
+        (self.logs / "full_run_LS.logpath").write_text(str(log), encoding="utf-8")
+        result = monitor.snapshot(self.config)
+        self.assertEqual(result["main_log"]["status"], "unknown")
+        self.assertNotIn("must not be read", monitor.format_snapshot(result))
+
+    def test_old_failed_input_report_does_not_override_active_worker(self):
+        self.participants.unlink()
+        prep = self.root / "preparation_LS"
+        prep.mkdir()
+        self.config["ls"]["preparation_dir"] = str(prep)
+        (prep / "input_report_LS.json").write_text(json.dumps({"status": "fail", "issues": [
+            {"severity": "error", "participant_id": "P0005", "message": "missing T1"},
+            {"severity": "error", "participant_id": "P0009", "message": "unknown SEX"}]}), encoding="utf-8")
+        self.processes = [self.master()]
+        result = monitor.snapshot(self.config)
+        self.assertEqual(result["runner"]["status"], "running")
+        self.assertEqual(result["input_report"]["status"], "fail")
+        self.assertEqual(result["input_report"]["error_count"], 2)
+        self.assertIsNotNone(result["input_report"]["mtime_utc"])
+        self.assertEqual(result["input_report"]["run_attribution"], "unverified")
+        output = monitor.format_snapshot(result)
+        self.assertIn("P0005: missing T1", output)
+        self.assertIn("may predate this worker", output)
+
+    def test_interval_switches_to_stage_table_when_roster_appears(self):
+        self.participants.unlink()
+        self.processes = [self.master()]
+        # Exercise the real CLI loop while avoiding YAML and wall-clock sleeps.
+        sleeps = []
+        def next_poll(interval):
+            sleeps.append(interval)
+            if len(sleeps) == 1:
+                self.people("P0001")
+            else:
+                raise KeyboardInterrupt
+        with patch.object(monitor, "_configuration", return_value=(self.config, self.config_path)), \
+                patch.object(monitor.time, "sleep", side_effect=next_poll), patch("builtins.print") as printed:
+            self.assertEqual(monitor.main(["--config", str(self.config_path), "--interval", "1"]), 0)
+        output = [call.args[0] for call in printed.call_args_list if call.args]
+        self.assertIn("Participant roster: not_ready", output[0])
+        self.assertIn("Participant roster: ready", output[1])
+        self.assertIn("ALL_SUBJECTS", output[1])
+
+    def test_missing_optional_process_telemetry_remains_unknown(self):
+        self.participants.unlink()
+        self.processes = [self.master()]
+        result = monitor.snapshot(self.config)
+        self.assertEqual(result["runner"]["status"], "running")
+        for key in ("cpu_seconds", "read_bytes", "rchar"):
+            self.assertIsNone(result["runner"][key])
+
+    def test_process_scan_reads_cpu_and_io_without_guessing(self):
+        proc = self.root / "proc"
+        process = proc / "50"
+        process.mkdir(parents=True)
+        fields = ["0"] * 20
+        fields[0], fields[1], fields[2] = "D", "1", "50"
+        fields[11], fields[12], fields[19] = "3400", "50", "1234"
+        (process / "stat").write_text("50 (python) " + " ".join(fields), encoding="utf-8")
+        (process / "cmdline").write_bytes(b"python\0runner_LS.py\0worker\0")
+        (process / "io").write_text("read_bytes: 4096\nrchar: 8192\n", encoding="utf-8")
+        self.process_patch.stop()
+        with patch.object(monitor, "Path", return_value=proc), patch.object(monitor.os, "sysconf", return_value=100):
+            processes, visible, errors = monitor.read_processes()
+        self.assertTrue(visible)
+        self.assertEqual(errors, [])
+        self.assertEqual(processes[0]["state"], "D")
+        self.assertEqual(processes[0]["cpu_seconds"], 34.5)
+        self.assertEqual(processes[0]["read_bytes"], 4096)
+        self.assertEqual(processes[0]["rchar"], 8192)
+
+    def test_optional_proc_io_denied_does_not_hide_process(self):
+        proc = self.root / "proc"
+        process = proc / "50"
+        process.mkdir(parents=True)
+        fields = ["0"] * 20
+        fields[0], fields[1], fields[2], fields[19] = "S", "1", "50", "1234"
+        (process / "stat").write_text("50 (python) " + " ".join(fields), encoding="utf-8")
+        (process / "cmdline").write_bytes(b"python\0runner_LS.py\0worker\0")
+        original = Path.read_text
+        def selective_read(path, *args, **kwargs):
+            if path == process / "io":
+                raise PermissionError("io denied")
+            return original(path, *args, **kwargs)
+        self.process_patch.stop()
+        with patch.object(monitor, "Path", return_value=proc), patch.object(Path, "read_text", selective_read):
+            processes, visible, errors = monitor.read_processes()
+        self.assertTrue(visible)
+        self.assertEqual(errors, [])
+        self.assertEqual(processes[0]["pid"], 50)
+        self.assertIsNone(processes[0]["read_bytes"])
+        self.assertIsNone(processes[0]["rchar"])
 
 
 if __name__ == "__main__":
